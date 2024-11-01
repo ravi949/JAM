@@ -1,0 +1,490 @@
+var MINIMUM_USAGE = 200;
+var auditRecSearchId = 'customsearch_mb_inv_adj_audit_search';
+var auditRecSearchName = 'Inventory Adjustment Audit Search (CODE LINKED)';
+var searchInvAdj = "customsearch_mb_inv_adjustments_by_date"; // base search 
+var searchName = 'Inventory Adjustment Lines (LINKED TO CODE DO NOT EDIT)';
+
+
+function scheduled(){
+	postBalanceCheck();
+}
+
+function postBalanceCheck(){
+    var runDate = nlapiGetContext().getSetting('SCRIPT', 'custscript1');
+    var runDate2 = nlapiGetContext().getSetting('SCRIPT','custscript_mb_second_date');
+    var internalId = nlapiGetContext().getSetting('SCRIPT','custscript_mb_inv_adj_id');
+    
+    try {
+		//nlapiLogExecution('debug','starting execution');
+		var filterToAdd = new Array()
+		filterToAdd.push(new nlobjSearchFilter('account',null,'anyof','595'))
+		filterToAdd.push(new nlobjSearchFilter('mainline',null,'is','T'))
+		
+		if (internalId!='' && internalId!=null) {
+			filterToAdd.push(new nlobjSearchFilter('internalid',null,'anyof',internalId));
+		} else if (runDate!='' && runDate2 != ''){ 	
+			//filterToAdd.push(new nlobjSearchFilter('custbody_mb_linked_audit_rec',null,'anyof',"@NONE@"));
+			filterToAdd.push(new nlobjSearchFilter('trandate',null,'within',runDate,runDate2));
+		} else {
+			filterToAdd.push(new nlobjSearchFilter('trandate',null,'on',runDate));
+		}
+		
+		var columnToAdd = [new nlobjSearchColumn('trandate').setSort(true)];
+		columnToAdd.push(new nlobjSearchColumn('custbody_mb_linked_audit_rec'));
+		columnToAdd.push(new nlobjSearchColumn('internalid').setSort(true));
+		
+		var invAdjSearch = generateSavedSearchResults(searchInvAdj,searchName, filterToAdd, 'T',columnToAdd,'T', null)[0];
+		
+		if (invAdjSearch){
+			//var arrDate = new Array();
+			for (var i=0; i < invAdjSearch.length;i++){
+
+				var res = invAdjSearch[i];
+			//	nlapiLogExecution('debug','sr',JSON.stringify(res));
+				
+				var resId = res.getId()
+				var tranDate = res.getValue('trandate');
+				auditRec = getAuditRec(tranDate);
+				//arrDate.push(tranDate);
+				//if (arrDate.indexOf)
+				//var invAdjRec = nlapiLoadRecord('inventoryadjustment',resId);
+				
+				if (auditRec=='' || (resId ==''|| resId==null)) {
+					nlapiLogExecution('debug','audit rec/resId was null',auditRec+', '+resId);
+					continue;
+				}
+//				var arrInvAdj = getInvAdj(tranDate,auditRec,resId);
+//				
+//				if (arrInvAdj){
+//					nlapiLogExecution('debug','arrComplete',arrInvAdj[0]);
+//				}
+//				
+				custAuditRec.updateLines(resId,auditRec);
+				
+			}
+		} else {
+			nlapiLogExecution('debug','no inv results');
+		}
+		
+    } catch(err){
+    	nlapiLogExecution('error','Error with Checking Lines',err);
+    }
+    
+}
+function getSiloLines(auditRec){
+	var filters = new Array();
+	filters.push(new nlobjSearchFilter('custrecord_mb_audit_parents',null,'anyof',auditRec));
+	filters.push(new nlobjSearchFilter('custrecord_mb_audit_siloed_line',null,'is','T'));
+	filters.push(new nlobjSearchFilter('custrecord_mb_'))
+	
+}
+var custAuditRec = {
+		
+		entityName: "customrecord_mb_inv_adj_audit",
+		//recordId : "",
+		insertRecord : function(){
+			var date = nlapiGetContext().getSetting('SCRIPT', 'custscript1');
+			
+			try{
+				var custRec = nlapiCreateRecord(this.entityName, {recordmode: 'dynamic'});
+				custRec.setFieldValue('custrecord_mb_runtime_date',date) // tran date
+				custRec.setFieldValue('name','Balance Inv Adj Script Ran on: '+date)
+				var recordId = nlapiSubmitRecord(custRec);
+
+			} catch(e){
+            	nlapiLogExecution("error", "Insert Audit Record Error", errText(e));
+			}
+			nlapiLogExecution('debug','audit rec id',recordId)
+			
+			return (recordId);
+		},
+		
+		addSiloLines : function(rcdId,invRec,item,location,adjQty,packSize,unitCost,line,memo,channel,isParent,totalCost){
+		    var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+		        try{
+		        	
+		        	var breakScript =false;
+		    		var remainingUsage = nlapiGetContext().getRemainingUsage()
+		    		nlapiLogExecution('audit','remaining usage - in silo lines',remainingUsage)
+		    		if (remainingUsage<= MINIMUM_USAGE) {
+		    		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+		    			var scriptId = nlapiGetContext().getScriptId();
+		    			var status = nlapiScheduleScript(scriptId);
+		    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+		    			breakScript = true;
+		    		}
+		    		
+		    		var arrParam = new Array();
+					arrParam['custparam_item'] = item;
+					arrParam['custparam_location'] = location;
+					arrParam['custparam_channel'] = channel;
+					arrParam['custparam_auditid'] = rcdId;
+					arrParam['custparam_memo'] = memo;
+					arrParam['custparam_invadj'] = invRec;
+					arrParam['custparam_adjqty'] = adjQty;
+					arrParam['custparam_line'] = line;
+					arrParam['custparam_totalcost'] = totalCost;
+					arrParam['custparam_isparent'] = isParent;
+					arrParam['custparam_oldcost'] = unitCost;
+					arrParam['custparam_packsize'] = packSize;
+					arrParam['custparam_type'] = 'silo';
+					
+					var url = nlapiResolveURL('SUITELET','customscript_mb_suitelet_build_auditline','customdeploy_mb_build_audit_lines','external');
+
+					var response = nlapiRequestURL(url,arrParam);
+					
+					var result = response.getBody();
+
+		        } catch(e){
+		        	var error = errText(e);
+		        	nlapiLogExecution("error","suiteScript has encountered an error.",error);
+		        }
+		},
+		// update audit lines to reflect that parent adjustment has been submitted after
+
+		updateLines : function(invAdj,auditRec){
+			
+			  var entityId = 'customrecord_mb_inv_adj_audit_lines';
+			  var field = 'custrecord_mb_inv_adj_saved';
+			  
+			  var filters = [];
+			  filters.push(new nlobjSearchFilter('custrecord_mb_audit_parent',null,'anyof',auditRec));
+			  filters.push(new nlobjSearchFilter('custrecord_mb_inventory_adjustment',null,'anyof',invAdj))
+			//  filters.push(new nlobjSearchFilter('custbody_mb_linked_audit_rec','inventoryadjustment',))
+
+			  var columns = new nlobjSearchColumn('internalid');
+			  
+			  var search = nlapiSearchRecord(entityId,null,filters,columns);
+			  
+			  if (search){
+				  for (y=0;y<search.length;y++){
+						var remainingUsage = nlapiGetContext().getRemainingUsage()
+						//nlapiLogExecution('audit','remaining usage',remainingUsage)
+						if (remainingUsage<= MINIMUM_USAGE) {
+						    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+							var scriptId = nlapiGetContext().getScriptId();
+							var status = nlapiScheduleScript(scriptId);
+							nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+						}
+						
+					  var result = search[y];
+					  nlapiSubmitField(entityId,result.getValue('internalid'),field,'T')
+					  nlapiLogExecution('debug','Updated Line',result.getValue('internalid'));
+				  };
+			  };
+		},
+		
+		addLine : function(rcdId, item, oldQ, oldCost, newQ,newCost,invRec,line,isParent,memo){
+		    var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+		        
+		        try{
+		        	
+		    		var remainingUsage = nlapiGetContext().getRemainingUsage()
+		    		nlapiLogExecution('audit','remaining usage -- in add line',remainingUsage)
+		    		if (remainingUsage<= MINIMUM_USAGE) {
+		    		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+		    			var scriptId = nlapiGetContext().getScriptId();
+		    			var status = nlapiScheduleScript(scriptId);
+		    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+		    		}
+		    		var arrParam = new Array();
+					arrParam['custparam_item'] = item;
+					arrParam['custparam_auditid'] = rcdId;
+					arrParam['custparam_memo'] = memo;
+					arrParam['custparam_invadj'] = invRec;
+					arrParam['custparam_line'] = line;
+					arrParam['custparam_isparent'] = isParent;
+					arrParam['custparam_oldcost'] = oldCost;
+					arrParam['custparam_newcost'] = newCost;
+					arrParam['custparam_oldq'] = oldQ;
+					arrParam['custparam_newq'] = newQ;
+					arrParam['custparam_type'] = 'cost';
+					
+					var url = nlapiResolveURL('SUITELET','customscript_mb_suitelet_build_auditline','customdeploy_mb_build_audit_lines','external');
+
+					var response = nlapiRequestURL(url,arrParam);
+					
+					var result = response.getBody();       	
+		        	
+		        } catch(e){
+		        	var error = errText(e);
+		        	nlapiLogExecution("error","suiteScript has encountered an error.",error);
+		        }
+		},
+		
+		checkLines : function(auditRec,arrComplete,arrIncomplete){
+			var entityId = 'customrecord_mb_inv_adj_audit_lines';
+			var field = 'custrecord_mb_inv_adj_saved';
+			var search = 'customsearch_mb_inv_adj_audit_lines_de_2';
+			var searchName = 'Inventory Adjustment Lines Search (LINKED TO CODE)';
+			
+			try{
+				var filters = [];
+				filters.push(new nlobjSearchFilter('custrecord_mb_audit_parent',null,'anyof',auditRec));
+				filters.push(new nlobjSearchFilter('custrecord_mb_inv_adj_saved',null,'is','F'));
+				if(arrComplete.length!=0 && typeof arrComplete=='array') filters.push(new nlobjSearchFilter('custrecord_mb_inventory_adjustment',null,'anyof',arrComplete))
+				
+				var columns = [];
+				columns.push(new nlobjSearchColumn('custrecord_mb_inventory_adjustment'))
+				
+				var search = generateSavedSearchResults(search,searchName,filters,'T',columns,'T')[0];
+				
+				if (search){
+					//var arrInvAdjRec = new Array();
+					for (i=0;i<search.length;i++){
+						
+						if (i==0 && search.length>10000){
+							nlapiLogExecution('ERROR','GREATER THAN 10000 AUDIT LINES KILLING SCRIPT',auditRec);
+							break;
+						};
+						
+						var breakScript = false;
+						var remainingUsage = nlapiGetContext().getRemainingUsage()
+						//nlapiLogExecution('audit','remaining usage',remainingUsage)
+						if (remainingUsage<= MINIMUM_USAGE) {
+							breakScript = true;
+						    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+							var scriptId = nlapiGetContext().getScriptId();
+							var status = nlapiScheduleScript(scriptId);
+							nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+						}
+						if (breakScript == true) break;
+						
+						var result = search[i];
+						var id = result.getId();
+						nlapiSubmitField(entityId,id,field,'T')
+						
+						nlapiLogExecution('debug','updated record',id);
+						//AuditRec.updateLines(invAdjRec,auditRec);
+					}
+
+				}
+			} catch(err){
+				nlapiLogExecution('error','Error checking completed lines',errText(err));
+			}
+			
+//			try {
+//				var filters = [];
+//				filters.push(new nlobjSearchFilter('custrecord_mb_audit_parent',null,'anyof','@NONE@'));
+//				filters.push(new nlobjSearchFilter('custrecord_mb_inv_adj_saved',null,'is','F'));
+//				if (arrIncomplete.length!=0 && typeof arrIncomplete== 'array') filters.push(new nlobjSearchFilter('custrecord_mb_inventory_adjustment',null,'anyof',arrIncomplete));
+//				
+//				var columns = [];
+//				columns.push(new nlobjSearchColumn('custrecord_mb_inventory_adjustment'))
+//				
+//				var search = generateSavedSearchResults(search,searchName,filters,'T',columns,'T')[0];
+//				
+//				if (search){
+//					
+//					//var arrInvAdjRec = new Array();
+//					for (i=0;i<search.length;i++){
+//						
+//						var breakScript = false;
+//						var remainingUsage = nlapiGetContext().getRemainingUsage()
+//						//nlapiLogExecution('audit','remaining usage',remainingUsage)
+//						if (remainingUsage<= MINIMUM_USAGE) {
+//							breakScript = true;
+//						    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//							var scriptId = nlapiGetContext().getScriptId();
+//							var status = nlapiScheduleScript(scriptId);
+//							nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+//						}
+//						if (breakScript == true) break;
+//						
+//						var result = search[i];
+//						var id = result.getId();
+//						
+//						nlapiDeleteRecord(entityId,id);
+//						
+//						nlapiLogExecution('debug','deleted line',id);
+//						//AuditRec.updateLines(invAdjRec,auditRec);
+//					}
+//
+//				}
+//			} catch(err){
+//				nlapiLogExecution('error','Error checking incomplete lines',errText(err));
+//			}
+		}
+}
+
+function getAuditRec(runDate){
+	var filterToAdd = new Array()
+	//nlapiLogExecution('debug','runDate',runDate);
+	filterToAdd.push(new nlobjSearchFilter('custrecord_mb_runtime_date',null,'on',runDate));
+	//filterToADd.push(new nlobjSearchFilter('cust'))
+	
+	var search = generateSavedSearchResults(auditRecSearchId,auditRecSearchName, filterToAdd,'T',null,null)[0];
+	if (search!=null || search!=''){
+		var auditRec = ''
+		if (search[0]) {
+			var auditRec = nlapiLoadRecord(custAuditRec.entityName,search[0].getId())
+		}
+		if (auditRec!='') {
+			return auditRec.getId();
+		}
+	} else {
+		return '';
+	}
+}
+
+function getSublistIds(rec,sublist){
+	if (typeof rec == 'object'){
+		var retArr = new Array();
+		retArr.push('0');
+		var ct = rec.getLineItemCount(sublist);
+		for (z=1;z<=ct;z++){
+			var line = rec.getLineItemValue(sublist,'line',z);
+			retArr.push(line);
+		}
+		return retArr;
+	} else {
+		return null;
+	}
+}
+
+function getTrueLine(array,line){
+	
+	var a = line.toString()
+	var result = array.indexOf(a);
+	
+	return result;
+	
+}
+
+function getInvAdj(tranDate,auditRec,internalId){
+	// returns an array of inventory adjustments that have been updated already
+	try{
+		var filterToAdd = new Array()
+		filterToAdd.push(new nlobjSearchFilter('account',null,'anyof','595'));
+		filterToAdd.push(new nlobjSearchFilter('mainline',null,'is','T'));
+		
+		if (internalId!='' && internalId!=null) {
+			filterToAdd.push(new nlobjSearchFilter('internalid',null,'anyof',internalId));
+		} else {
+			filterToAdd.push(new nlobjSearchFilter('custbody_mb_linked_audit_rec',null,'noneof',"@NONE@"));
+			filterToAdd.push(new nlobjSearchFilter('trandate',null,'on',tranDate));
+		}
+		
+		var columnToAdd = [new nlobjSearchColumn('trandate')]
+	//	columnToAdd.push(new nlobjSearchColumn('custbody_mb_linked_audit_rec'));
+		//columnToAdd.push(new nlobjSearchColumn('internalid').setSort(true));
+		//columnToAdd.push(new nlobjSearchColumn(''))
+
+		var completeInvAdj = generateSavedSearchResults(searchInvAdj,searchName, filterToAdd, 'T',columnToAdd,'T', null)[0];
+		var arrCompleted = new Array();
+		
+		if (completeInvAdj){
+			for (i=0;i<completeInvAdj.length;i++){
+				var result = completeInvAdj[i];
+				var id = result.getId();
+				if (arrCompleted.indexOf(id)==-1) {
+					arrCompleted.push(id);
+				} else {
+					continue;
+				}
+			}
+		}
+	} catch(err){
+		nlapiLogExecution('ERROR','ERROR getting Complete Inv Adjs',errText(err));
+	}
+	
+//	try{
+//		var arrIncomplete = new Array();
+//		var filters = new Array();
+//		filters.push(new nlobjSearchFilter('account',null,'anyof','595'))
+//		filters.push(new nlobjSearchFilter('mainline',null,'is','T'))
+//		
+//		if (internalId!='' && internalId!=null){
+//			filters.push(new nlobjSearchFilter('internalid',null,'is',internalId))
+//		} else {
+//			filters.push(new nlobjSearchFilter('custbody_mb_linked_audit_rec',null,'anyof',"@NONE@"));
+//			filters.push(new nlobjSearchFilter('trandate',null,'on',tranDate));
+//		}
+//		
+//		var incompleteInvAdj= generateSavedSearchResults(searchInvAdj,searchName, filters, 'T',columnToAdd,'T', null)[0];
+//		
+//		if (incompleteInvAdj){
+//			for(i=0;i<incompleteInvAdj.length;i++){
+//				var result = incompleteInvAdj[i];
+//				var id = result.getId();
+//				if (arrIncomplete.indexOf(id)==-1) {
+//					arrIncomplete.push(id)
+//				} else {
+//					continue;
+//				}
+//			}
+//		}
+//	} catch(err){
+//		nlapiLogExecution('ERROR','ERROR getting Incomplete Inv Adjs',errText(err));
+//	}
+	
+	return arrCompleted//,arrIncomplete];
+	
+}
+
+function generateSavedSearchResults(savedSearchId , savedSearchName , addFilters , enableAddFilters , addColumns, enableAddColumns,recType) {
+	var generatedResults = new Array();
+	var searchColumns    = new Array();
+	if( ((addFilters != '' && addFilters != null) || enableAddFilters != 'T' ) || (addColumns != '' && addColumns != null) || enableAddColumns != 'T' ){
+		try{
+			
+			var remainingUsage = nlapiGetContext().getRemainingUsage()
+			//nlapiLogExecution('audit','remaining usage',remainingUsage)
+			if (remainingUsage<= MINIMUM_USAGE) {
+			    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+				var scriptId = nlapiGetContext().getScriptId();
+				var status = nlapiScheduleScript(scriptId);
+				nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+				return null;
+			}
+			
+			//Executing a Saved search with received savedSearchId
+			var recordSearch = nlapiLoadSearch('', savedSearchId);
+			if( addFilters != '' && addFilters != null && enableAddFilters == 'T' ){
+				recordSearch.addFilters( addFilters );
+			};
+			
+			if (addColumns !='' && addColumns!=null && enableAddColumns =='T'){
+				recordSearch.addColumns(addColumns);
+			};
+
+			var resultSet=recordSearch.runSearch();
+			var resultslice = '';
+			var id=0;
+//			nlapiLogExecution("debug", "sr length", resultSet.length);
+			
+			for(var t=0 ; resultslice.length >= 1000 || t ==0 ; t++){
+
+				resultslice = resultSet.getResults(id, id+1000 );
+				if (resultslice != null && resultslice != ''){
+					generatedResults = generatedResults.concat(resultslice);
+					id += resultslice.length;
+				}
+//				nlapiLogExecution("debug", "output length", generatedResults.length);
+			}
+			searchColumns = recordSearch.getColumns();
+			return [generatedResults , searchColumns ];
+		}catch(ERR_SavedSearch){
+			nlapiLogExecution('ERROR','Error Occured in Processing SavedSearch('+savedSearchName+':'+savedSearchId+') Results Block ',errText(ERR_SavedSearch));
+			return [generatedResults , searchColumns ];
+		}
+	}
+	return [generatedResults , searchColumns ];
+}
+
+function errText(_e) {
+    _internalId = nlapiGetRecordId();
+    if (!(typeof _internalId === "number" && (_internalId % 1) === 0)) {
+	_internalId = 0;
+    }
+    var txt = "";
+    if (_e instanceof nlobjError) {
+    	// this is netsuite specific error
+    	txt = "SuiteScript Error: Record ID :: " + _internalId + " :: " + _e.getCode() + " :: " + _e.getDetails() + " :: " + _e.getStackTrace().join(", ");
+    }
+    else {
+    	// this is generic javascript error
+    	txt = "JavaScript/Other Error: Record ID :: " + _internalId + " :: " + _e.toString() + " : " + _e.stack;
+    }
+    return txt;
+}

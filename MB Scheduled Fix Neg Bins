@@ -1,0 +1,387 @@
+const MINIMUM_USAGE = 1000;
+var newInvAdjAcctId = '664'; // check in production?
+
+function scheduled(){
+	
+	var ids = nlapiGetContext().getSetting('SCRIPT','custscript_mb_internalid_fix_neg_bins');
+	
+	if (ids!=null && ids!=''){
+		ids = ids.split(',');
+	}
+	nlapiLogExecution('debug','ids',ids);
+	
+	if (ids.length!=0){
+		for (i=0;i<ids.length;i++){
+			fixDaysNegBins(ids[i]);
+		}
+	} else {
+		throw nlapiCreateError('NO_INTERNAL_IDS','No internal IDs provided to fill negative bins',true);
+	}
+};
+
+function fixDaysNegBins(internalId){
+	// find the items with these negative bins for this date and build negative inventory;
+	try{
+		var date = new Date();
+		date = getDate(date,2);
+		var today = getDate(new Date(),2);
+		
+		//var searchLoc = ['11','12','13','22'];
+      	var searchLoc = ['11'];
+
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('internalid',null,'anyof',internalId));
+		//filters.push(new nlobjSearchFilter('formulanumeric',null,'equalto',1).setFormula('case when {item}={custcol_mb_item_parent} then 1 else 0 end'));
+		//filters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+		
+		var columns = new Array();
+		columns.push(new nlobjSearchColumn('item',null,'group').setSort(true));
+//		columns.push(new nlobjSearchColumn('internalid','binNumber','group'));
+		
+		//var search = nlapiSearchRecord('transaction',null,filters,columns);
+		var search = generateSavedSearchResults('customsearch752','trx search',filters,'T',null,null,null)[0];
+		
+		if (search){
+
+			var items = search.map(function(res,index){
+				return res.getValue('item',null,'group');
+			});
+			nlapiLogExecution('debug','items',items);
+			
+			var filters2 = new Array();
+			filters2.push(new nlobjSearchFilter('item',null,'anyof',items));
+			filters2.push(new nlobjSearchFilter('location',null,'anyof',searchLoc));
+			//filters2.push(new nlobjSearchFilter('internalid','binNumber','anyof',bins));
+			filters2.push(new nlobjSearchFilter('trandate',null,'onorafter','12/31/2017'));
+		    //filters2.push(new nlobjSearchFilter('trandate',null,'onorbefore',today));
+			filters2.push(new nlobjSearchFilter('binnumberquantity',null,'lessthanorequalto',0).setSummaryType('sum'));
+			
+			var columns2 = new Array();
+			columns2.push(new nlobjSearchColumn('internalid','binnumber','group'));
+			//columns2.push(new nlobjSearchColumn('location',null,'group'));
+			
+			columns2.push(new nlobjSearchColumn('formulanumeric',null,'avg').setFormula('round({item.locationaveragecost},5)'));
+			
+			var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_7','Inventory Valuation Search',filters2,'T',columns2,'T',null)
+			var itemSearch = arrSearch[0];
+			var columns = arrSearch[1];
+			
+			if (itemSearch){
+				if (itemSearch.length>0){
+					var newPrefix = internalId+'_TEMP_ADJ_'//getPrefix(tranDate).toString();
+					var name = newPrefix;
+					var invAdj = newInvAdjRec.insertRecord(name,date,'18',null);
+					
+					for (w=0;w<itemSearch.length;w++){
+						var res = itemSearch[w];
+						var item = res.getValue('item',null,'group');
+						var qty = absVal(res.getValue('binnumberquantity',null,'sum'))+1000;
+						var bin = res.getValue('internalid','binnumber','group');
+						var binName = res.getValue('binnumber',null,'group');
+						if (binName ==null || binName =='- None -') continue;
+						var bins = [{'bin':bin,'binQty':qty}];
+						var location = res.getValue('location',null,'group');
+						var cost = absVal(res.getValue('formulanumeric',null,'avg')); 
+						
+						newInvAdjRec.addInvLines(invAdj,item,qty,null,location,cost,bins,'[CURR AVG COST]',null,'DUMMY ADJ TO PROCESS RECORDS','1',null,true);
+						
+					};
+					
+					var submit = nlapiSubmitRecord(invAdj);
+					nlapiLogExecution('debug','submit for '+internalId,submit);
+					return submit; 
+				}
+			};
+		}
+		
+	} catch(err){
+		nlapiLogExecution('error','Error filling negative bins',JSON.stringify(err));
+		return null;
+	};
+
+};
+
+
+function generateSavedSearchResults(savedSearchId , savedSearchName , addFilters , enableAddFilters , addColumns, enableAddColumns,recType) {
+	var generatedResults = new Array();
+	var searchColumns    = new Array();
+	if( ((addFilters != '' && addFilters != null) || enableAddFilters != 'T' ) || ((addColumns != '' && addColumns != null) || enableAddColumns != 'T' )){
+		try{
+			
+			var remainingUsage = nlapiGetContext().getRemainingUsage()
+			//nlapiLogExecution('audit','remaining usage',remainingUsage)
+			if (remainingUsage<= MINIMUM_USAGE) {
+				var flag = true
+			    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+				var scriptId = nlapiGetContext().getScriptId();
+				var status = nlapiScheduleScript(scriptId);
+				nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+				throw usageError;
+			}
+			if (flag == true ){
+				return [null,null];
+			}
+			//Executing a Saved search with received savedSearchId
+			var recordSearch = nlapiLoadSearch('', savedSearchId);
+			
+			if( addFilters != '' && addFilters != null && enableAddFilters == 'T' ){
+				recordSearch.addFilters( addFilters );
+			};
+			
+			if (addColumns !='' && addColumns!=null && enableAddColumns =='T'){
+				recordSearch.addColumns(addColumns);
+			};
+
+			var resultSet=recordSearch.runSearch();
+			var resultslice = '';
+			var id=0;
+//			nlapiLogExecution("debug", "sr length", resultSet.length);
+			
+			for(var t=0 ; resultslice.length >= 1000 || t ==0 ; t++){
+
+				resultslice = resultSet.getResults(id, id+1000 );
+				if (resultslice != null && resultslice != ''){
+					generatedResults = generatedResults.concat(resultslice);
+					id += resultslice.length;
+				}
+//				nlapiLogExecution("debug", "output length", generatedResults.length);
+			}
+			searchColumns = recordSearch.getColumns();
+			return [generatedResults , searchColumns ];
+		}catch(ERR_SavedSearch){
+
+			nlapiLogExecution('ERROR','Error Occured in Processing SavedSearch('+savedSearchName+':'+savedSearchId+') Results Block ',errText(ERR_SavedSearch));
+			if (ERR_SavedSearch instanceof nlobjError){
+				if (ERR_SavedSearch.getCode() == 111){
+					throw usageError;
+				}
+			}
+			return [generatedResults , searchColumns ];
+		}
+	}
+	return [generatedResults , searchColumns ];
+}
+
+function sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody) {
+    
+	try{
+		if(emailBody && fromEmail && toEmail){
+			nlapiSendEmail(fromEmail, toEmail, emailSubject, emailBody);
+		}
+	}catch(e){
+		nlapiLogExecution('error', 'There was a error while sending a mail', e);
+	}
+}
+
+function parseFloatOrZero(val) {
+    	return isNaN(parseFloat(val)) ? 0 : parseFloat(val);
+}
+
+function errText(_e) {
+    _internalId = nlapiGetRecordId();
+    if (!(typeof _internalId === "number" && (_internalId % 1) === 0)) {
+	_internalId = 0;
+    }
+    var txt = "";
+    if (_e instanceof nlobjError) {
+    	// this is netsuite specific error
+    	txt = "SuiteScript Error: Record ID :: " + _internalId + " :: " + _e.getCode() + " :: " + _e.getDetails() + " :: " + _e.getStackTrace().join(", ");
+    }
+    else {
+    	// this is generic javascript error
+    	txt = "JavaScript/Other Error: Record ID :: " + _internalId + " :: " + _e.toString() + " : " + _e.stack;
+    }
+    return txt;
+}
+
+function roundVal(val) {
+    var dec = 2;
+    var result = Math.round(val * Math.pow(10, dec)) / Math.pow(10, dec);
+    return result;
+}
+
+function emptyIfNull(val) {
+    return val == null ? "" : val;
+}
+
+function absVal(int){
+	var num = parseFloat(int)
+	if (num < 0) {
+		return (num*-1)
+	} else {
+		return num;
+	}
+}
+
+function oppVal(int){
+	var num = parseFloat(int)
+	return (num*-1)
+}
+
+function getDate(date,addDays){
+	if (addDays ==null || addDays == ''){
+		addDays = 0;
+	}
+	var dateToSet = new Date(date);
+
+	var newDate = nlapiAddDays(dateToSet,addDays);
+	var result = nlapiDateToString(newDate,'date')
+	
+	return result;
+}
+
+function qtyReducer(total,res){
+	var sum = total+parseFloat(res.getValue('quantity'));
+	return sum;
+}
+
+function getPrefix(date){
+	try {
+		var arr = date.split('/');
+		var monthNum = arr[0];
+		var dayNum = arr[1].toString();
+		if (dayNum.length==1) dayNum = '0'+dayNum;
+		var monthName = ''
+		switch(monthNum){
+			case '1':
+				monthName = 'Jan';
+				break;
+			case '2':
+				monthName = 'Feb';
+				break;
+			case '3':
+				monthName = 'Mar';
+				break;
+			case '4': 
+				monthName = 'Apr';
+				break;
+			case '5':
+				monthName = 'May';
+				break;
+			case '6' : 
+				monthName = 'Jun';
+				break;
+			case '7' : 
+				monthName = 'Jul';
+				break;
+			case '8':
+				monthName = 'Aug';
+				break;
+			case '9':
+				monthName = 'Sep';
+				break;
+			case '10':
+				monthName = 'Oct';
+				break;
+			case '11':
+				monthName = 'Nov';
+				break;
+			case '12':
+				monthName = 'Dec';
+		}
+		var str = arr[2].toString()+monthName+dayNum.toString();
+		return str;
+	} catch(err){
+		nlapiLogExecution('error','Error getting prefix',JSON.stringify(err));
+		return null;
+	}
+	
+}
+
+function roundVal(val) {
+    var dec = 5;
+    var result = Math.round(val * Math.pow(10, dec)) / Math.pow(10, dec);
+    return result;
+}
+
+function setPreference(date){
+	try{
+		var config = nlapiLoadConfiguration('companypreferences');
+		config.setFieldValue('custscript_mb_first_date_fix',date);
+		config.setFieldValue('custscript_mb_second_date_fix',date);
+		var submit = nlapiSubmitConfiguration(config);
+		return 'Success';
+	} catch(err){
+		return 'Failure';
+		nlapiSendEmail('1423','Lucas@mibar.net','Error setting preferences','Manually start the 5025 script');
+	}
+	
+}	
+
+var newInvAdjRec = { // PD object function 
+		entityName: "inventoryadjustment",
+		sublist: 'inventory',
+		//recordId : "",
+		// create custom record
+		insertRecord : function(tranId,date,sub,auditRec){
+			
+			try{
+				var name = tranId;
+				var newName = name+'_inv_adj_script';
+				
+				var invAdj = nlapiCreateRecord(this.entityName);
+				
+				invAdj.setFieldValue('trandate',date); // tran date
+				invAdj.setFieldValue('tranid', newName);
+				invAdj.setFieldValue('subsidiary',sub);
+				invAdj.setFieldValue('account',newInvAdjAcctId);
+				invAdj.setFieldValue('custbody_mb_linked_audit_rec',auditRec);
+
+				//var recordId = nlapiSubmitRecord(invAdj);
+
+			} catch(err){
+            	nlapiLogExecution("error", "Insert Inv Adj Record Error", errText(err));
+        		if (err instanceof nlobjError){
+        			if (err.getCode() == 111){
+        				throw usageError;
+        			}
+        		}
+			}
+		//	nlapiLogExecution('debug','invadj id',recordId)
+			
+			return (invAdj);
+		},
+		
+		addInvLines : function(rcd,item,qty,channel,location,cost,bins,reason,invAdjId,memo,packsize,parent,createPDs){
+
+			if (createPDs!='F' && createPDs!=false){
+				try {
+					rcd.selectNewLineItem(this.sublist);
+					rcd.setCurrentLineItemValue(this.sublist,'item',item);
+					rcd.setCurrentLineItemValue(this.sublist,'adjustqtyby',qty);
+					rcd.setCurrentLineItemValue(this.sublist,'class',channel);
+					rcd.setCurrentLineItemValue(this.sublist,'location',location);
+					rcd.setCurrentLineItemValue(this.sublist,'custcol_mb_item_pack_size',packsize);
+					rcd.setCurrentLineItemValue(this.sublist,'custcol_mb_item_parent',parent);
+					rcd.setCurrentLineItemValue(this.sublist,'memo',memo)
+					rcd.setCurrentLineItemValue(this.sublist,'unitcost',roundVal(cost));
+					
+					var subrecord = rcd.createCurrentLineItemSubrecord('inventory', 'inventorydetail');
+					var flag = false;
+					
+					for (x=0;x<bins.length;x++){
+						
+						subrecord.selectNewLineItem('inventoryassignment');
+						subrecord.setCurrentLineItemValue('inventoryassignment', 'binnumber', bins[x].bin);
+						subrecord.setCurrentLineItemValue('inventoryassignment', 'quantity', bins[x].binQty);
+						subrecord.commitLineItem('inventoryassignment');
+						var flag = true
+					}
+					
+					//rcd.setCurrentLineItemValue(this.sublist,)
+					rcd.setCurrentLineItemValue(this.sublist,'unitcost',roundVal(cost));
+					if (flag==true) subrecord.commit();
+					rcd.commitLineItem(this.sublist)
+				} catch (err){
+					nlapiLogExecution('error','Error in creating new inv adj rec line',errText(err));
+					if (err instanceof nlobjError){
+						if (err.getCode() == 111){
+							throw usageError;
+						}
+					}
+				}
+			}
+		}
+}
+
+

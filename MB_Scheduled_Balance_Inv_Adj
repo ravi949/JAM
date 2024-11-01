@@ -1,0 +1,1938 @@
+/**
+ * Module Description
+ *
+ * Version    Date            Author           Remarks
+ * 1.00       14 Dec 2018     lucas			   
+ *
+ *
+ */ 
+
+var MINIMUM_USAGE = 200;
+var searchInvAdj = "customsearch_mb_inv_adjustments_by_date"; // base search 
+var searchName = 'Inventory Adjustment Lines (LINKED TO CODE DO NOT EDIT)';
+var newInvAdjAcctId = '664'; // check in production?
+var auditRecSearchId = 'customsearch_mb_inv_adj_audit_search';
+var auditRecSearchName = 'Inventory Adjustment Audit Search (CODE LINKED)';
+//var itemSearch = 'customsearch_mb_avg_cost_lpp';
+//var itemSearchName = 'Item Average Cost and LPP (LINKED TO CODE DO NOT EDIT)';
+var auditLineSearch = 'customsearch_mb_inv_adj_audit_sublist';
+var updateScript = 'customscript_mb_sched_update_lines';
+var avgCostArray = [];
+var usageError = nlapiCreateError(111,'Not enough usage remaining, rescheduling script.',true);
+var restartError = nlapiCreateError('FINISHED_REC','Finished loop, restarting script',true);
+var timeError = nlapiCreateError('BREAK_FOR_SQL','Script execution is paused until 3 so SQL can refresh',true);
+
+function scheduled(){
+	updatePairs()
+};
+
+function updatePairs(){
+	
+	var emailBody = ''; // Used to store list of errors that are generated
+    var emailSubject = 'Please Check the Below. ';
+    var badItems = new Array()
+    var fromEmail = '1423';
+    var toEmail = ['netsuite@mibar.net'];
+    var newInvAdj = '';
+    var runDate = nlapiGetContext().getSetting('SCRIPT', 'custscript_mb_first_date');//first date to run on  
+    var runDate2 = nlapiGetContext().getSetting('SCRIPT','custscript_mb_second_date'); // second date to run on;
+    var internalId = nlapiGetContext().getSetting('SCRIPT','custscript_mb_inv_adj_id'); // if running on just one record;
+    if (internalId!=null){
+    	if(internalId.search(',')!=-1) internalId = internalId.split(',');
+    }
+    var createPDs = nlapiGetContext().getSetting('SCRIPT','custscript_mb_create_pds');
+    var pauseForSQL = nlapiGetContext().getSetting('SCRIPT','custscript_mb_pause_for_sql');
+   // if (internalId.length!=6) internalId ='';
+    var firstExecution = false;
+    var auditRec = '';
+    var newInv = '';
+	var firstLoop = true;
+    var newInvAdjId = ''
+    var submitCt = 0;
+	
+	try {
+		// search for 5025 records within date range
+		var filterToAdd = new Array()
+		filterToAdd.push(new nlobjSearchFilter('account',null,'anyof','595'))
+		filterToAdd.push(new nlobjSearchFilter('mainline',null,'is','T'))
+		filterToAdd.push(new nlobjSearchFilter('internalid',null,'noneof',['332380','445296','968861','968961','2642850']))
+		
+		if (internalId!='' && internalId!=null) {
+			filterToAdd.push(new nlobjSearchFilter('internalid',null,'anyof',internalId));
+		} else if (runDate2!=''){
+			filterToAdd.push(new nlobjSearchFilter('custbody_mb_linked_audit_rec',null,'anyof',"@NONE@"));
+			filterToAdd.push(new nlobjSearchFilter('trandate',null,'within',[runDate,runDate2]));
+		} else {
+			filterToAdd.push(new nlobjSearchFilter('custbody_mb_linked_audit_rec',null,'anyof',"@NONE@"));
+			//filterToAdd.push(new nlobjSearchFilter('internalid',null,'noneof','224438'));
+			filterToAdd.push(new nlobjSearchFilter('trandate',null,'on',runDate));
+		}
+		
+		// needed to fill the days bins before processing;
+//		var tbdRec = fixDaysNegBins('1/3/2019');
+		//if (tbdRec) nlapiSubmitField(custAuditRec.entityName,'','custrecord_mb_adj_to_be_deleted',tbdRec);
+//		throw nlapiCreateError('FILLING_BINS','Filling bins for days execution',true);
+		
+		var columnToAdd = [new nlobjSearchColumn('trandate').setSort(false)];
+		columnToAdd.push(new nlobjSearchColumn('custbody_mb_linked_audit_rec'));
+		columnToAdd.push(new nlobjSearchColumn('internalid'));
+
+		var invAdjSearch = generateSavedSearchResults(searchInvAdj,searchName, filterToAdd, 'T',columnToAdd,'T', null)[0];
+		
+		if (invAdjSearch){
+			
+			for (var i=0; i < invAdjSearch.length;i++){
+				
+				if (pauseForSQL=='T'||pauseForSQL==true){
+					var todaysDate = new Date();
+					var hours = todaysDate.getHours();
+					var minutes = todaysDate.getMinutes();
+					if (hours==1 && minutes>=50){
+						throw timeError;
+					}
+				}
+				
+				var remainingUsage = nlapiGetContext().getRemainingUsage()
+				if (remainingUsage<= MINIMUM_USAGE) {
+				    nlapiLogExecution('AUDIT', 'Scheduling Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//					var scriptId = nlapiGetContext().getScriptId();
+//					var status = nlapiScheduleScript(scriptId);
+//	    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+	    			throw usageError;
+				}
+				// open each record
+				var restart = true;
+				if (invAdjSearch.length==1) restart=false;
+				var usedInvAdj = false; // only submit the inv adj if it was actually used;
+				
+				var result = invAdjSearch[i];
+				var resId = result.getId();
+				
+				var invAdjRec = nlapiLoadRecord('inventoryadjustment',resId);
+				nlapiLogExecution('debug','starting record: '+resId);
+				var tranId = invAdjRec.getFieldValue('tranid');
+				
+				var tranDate = invAdjRec.getFieldValue('trandate');
+				var oldHeaderMemo = invAdjRec.getFieldValue('memo');
+				var lineCt = invAdjRec.getLineItemCount('inventory');
+				var sub = invAdjRec.getFieldValue('subsidiary');
+				var origTotalValue = invAdjRec.getFieldValue('estimatedtotalvalue');
+				var isFBA = tranId.search('FBA')== -1 ? false : true;
+				var start=1;
+				var end=0;
+				var finished = true;
+				
+				nlapiLogExecution('debug','trandate',tranDate);
+				auditRec = getAuditRec(tranDate);
+
+				nlapiLogExecution('debug','Audit Rec',auditRec);
+
+				if (auditRec=='' || auditRec == null) {
+					auditRec = custAuditRec.insertRecord(tranDate);
+					//var tbdRec = fixDaysNegBins(tranDate);
+					//if (tbdRec) nlapiSubmitField(custAuditRec.entityName,auditRec,'custrecord_mb_adj_to_be_deleted',tbdRec);					
+//					
+					newInvAdjId= '';
+					newInvAdj= '';
+					newInv = '';
+					firstLoop = true;
+					firstExecution = true;
+				} else {
+					firstExecution = false;
+				}
+				
+				if (oldHeaderMemo==null || oldHeaderMemo=='') {
+					// if the record has no memo, it was not built by the api, skip;
+					invAdjRec.setFieldValue('custbody_mb_linked_audit_rec',auditRec)
+					var submit = nlapiSubmitRecord(invAdjRec);
+					continue;
+				}
+
+				if (firstExecution==false) {	
+					// get PD if a new audit record was not created;
+					newInvAdjId = nlapiLookupField(custAuditRec.entityName,auditRec,'custrecord_mb_attached_inv_adj');
+				}
+				
+				var arr2 = [''];
+				
+				if (i>0){
+					firstLoop = false;
+				}
+				
+				if (createPDs != "F" && createPDs!=false) {
+					// if PDs are on, and the audit record does not have a PD already, create a new one. If it does have the audit record, load it; 
+					if ((newInvAdjId == '' || newInvAdjId == null) && newInvAdj==''){
+						var newDate = getDate(tranDate,-1);
+						newInvAdj = newInvAdjRec.insertRecord(tranId,newDate,sub,auditRec);
+						newInvAdjId = newInvAdj.getId();
+					} else if (newInvAdjId!='' && newInvAdjId!= null && newInvAdj==''){
+						newInvAdj = nlapiLoadRecord('inventoryadjustment',newInvAdjId);
+					}
+				}
+				
+				invAdjRec.setFieldValue('custbody_mb_original_total_value',origTotalValue);
+				
+				var arrSublistLines = getSublistIds(invAdjRec,'inventory');
+				
+				var costCount = 0; // increment everytime a pair is added to the audit record.
+				var adjCount = 0;  // increment everytime a PD is created from this record;
+				
+				// Logic to handle bigger records - the end point says where the script finished previously; 
+				if (oldHeaderMemo.search('#EndPoint:')!=-1){
+					var start = oldHeaderMemo.split('#EndPoint:')[1];
+					start = parseFloat(start)+1;
+					
+					if(oldHeaderMemo.search('#[SCR_COST]')!=-1){
+						var str = oldHeaderMemo.split('#[SCR_COST]:')[1];
+						var prevCostChng = str.split(' #[SCR_SHORT]')[0]
+						prevCostChng = parseFloat(prevCostChng)
+						costCount+prevCostChng;
+					}
+					if(oldHeaderMemo.search('#[SCR_COST]')!=-1){
+						var prevAdjChng = oldHeaderMemo.split('#[SCR_SHORT]:')[1];
+						prevAdjChng = parseFloat(prevAdjChng)
+						adjCount+prevAdjChng;
+					}
+				}
+				
+				if (lineCt<200){
+					restart=false;
+				}
+								
+				var numLines = nlapiGetContext().getSetting('SCRIPT','custscript_mb_num_lines'); // param to set number of lines if a record can't be processed in one go;
+				
+				if (numLines==''|| numLines==null|| numLines==0) {
+					numLines = 500;
+				} else {
+					numLines = parseFloat(numLines);
+				}
+				
+				if (lineCt>numLines){
+					
+					var end = start+(numLines-1)
+					
+					if (end>lineCt){
+						end = lineCt;
+						finished = true;
+						
+					} else {
+						end = start+(numLines-1);
+						finished=false;
+					}
+				} else {
+					end = lineCt;
+					finished = true;
+				}
+				nlapiLogExecution('debug','start',start);
+				nlapiLogExecution('debug','end',end);
+				
+				for (var j=start;j<=end;j++) {
+					
+					invAdjRec.selectLineItem('inventory',j);
+					
+					var line = j.toString();
+					
+					var item = invAdjRec.getCurrentLineItemValue('inventory','item');
+					
+					if (item =='80768' || item == '102391') continue; // told by pramod to add this 
+					
+					var parent = invAdjRec.getCurrentLineItemValue('inventory','custcol_mb_item_parent');
+					
+					var parLocation  = invAdjRec.getCurrentLineItemValue('inventory','location'); // stopped using this due to inconsistency;
+					var lineQty = invAdjRec.getCurrentLineItemValue('inventory','adjustqtyby');
+
+					var isParent = item==parent ? 'parent' : 'child';
+					
+					var itemLocConcat = parent.toString()+parLocation.toString();
+					
+//					nlapiLogExecution('debug','itemloc',itemLocConcat);
+					
+					if (arr2.indexOf(itemLocConcat)!=-1){
+//						nlapiLogExecution('debug','Skipped line',j);
+						continue;
+					} else {
+						arr2.push(itemLocConcat);
+					};
+					
+					if (isParent == 'parent'){
+						// if an item is a parent item, search for children on the record; 
+						
+						var remainingUsage = nlapiGetContext().getRemainingUsage()
+						//nlapiLogExecution('audit','remaining usage',remainingUsage)
+						if (remainingUsage<= MINIMUM_USAGE) {
+						    nlapiLogExecution('AUDIT', 'Scheduling Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//							var scriptId = nlapiGetContext().getScriptId();
+//							var status = nlapiScheduleScript(scriptId);
+//			    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+			    			throw usageError;
+						}
+						
+						var addFilters = [];
+						addFilters.push(new nlobjSearchFilter('custcol_mb_item_parent',null,'anyof',parent));
+						addFilters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+						addFilters.push(new nlobjSearchFilter('internalid',null,'anyof',invAdjRec.getId()));
+						if (isFBA == false) {
+							addFilters.push(new nlobjSearchFilter('location',null,'anyof', parLocation));
+						}
+
+						var addColumns = [];
+						addColumns.push(new nlobjSearchColumn('item'));
+						addColumns.push(new nlobjSearchColumn('quantity'));
+						addColumns.push(new nlobjSearchColumn('memo'));
+						addColumns.push(new nlobjSearchColumn('amount'));
+						addColumns.push(new nlobjSearchColumn('location'));
+						addColumns.push(new nlobjSearchColumn('line'));
+						addColumns.push(new nlobjSearchColumn('custcol_mb_item_parent'));
+						addColumns.push(new nlobjSearchColumn('class'));
+						addColumns.push(new nlobjSearchColumn("formulatext").setFormula("case when {item} = {custcol_mb_item_parent} then 1 else 0 end").setSort(false))
+
+						var res = generateSavedSearchResults( searchInvAdj,searchName, addFilters, "T",addColumns, "T",'transaction')[0];
+						
+						if(res){
+							if (res.length<2 && res.length % 2 != 0){
+								// logic to handle an uneven amount of parents (siloed situation); UNNEEDED BECAUSE OF FIX 5025;
+								for (var m1 = 0; m1<res.length; m1++) {
+									var itemLocConcat ='';
+									
+									var resObj = {
+										item : res[m1].getValue('item'),
+										//adjQty : res[k].getValue('quantity'),
+										adjQtyType : res[m1].getValue('quantity')>0 ? 'positive' : 'negative',
+										memo : res[m1].getValue('memo'),
+										//totalCost : res[k].getValue('amount'),
+										location : res[m1].getValue('location'),
+										lineId : parseFloat(res[m1].getValue('line')),
+										//qoh : res[k].getValue('quantityohand'),
+										//newQty : res[k].getValue('newquantity'),
+										channel : res[m1].getValue('class')
+									}
+									
+									var arrChild = new Array();
+									var arrParent = new Array();
+									
+									if (res[m1].getValue('formulatext') == 1 && resObj!=null){
+										// stamp siloed lines with new memo so they can be tracked via search 
+										
+										parent = new Object();
+										
+										parent = createParentObj(resObj);
+										
+										parent.line = getTrueLine(arrSublistLines,parent.lineId);
+//										parent.adjQty = parseFloat(invAdjRec.getLineItemValue('inventory','adjustqtyby',parent.line));
+//										parent.unitCost = parseFloat(invAdjRec.getLineItemValue('inventory','unitcost',parent.line));
+//										parent.packSize = invAdjRec.getLineItemValue('inventory','custcol_mb_item_pack_size',parent.line);
+										parent.qoh = invAdjRec.getLineItemValue('inventory','quantityonhand',parent.line);
+//										parent.newQty = invAdjRec.getLineItemValue('inventory','newquantity',parent.line);
+//										parent.parent = invAdjRec.getLineItemValue('inventory','custcol_mb_item_parent',parent.line)
+//										parent.totalCost = parseFloat(parent.unitCost * parent.adjQty).toFixed(5);
+										
+//										parent.updateVal = parent.item.toString()+parent.location.toString();
+										
+//										var item = parent.item
+//										var location = parent.location
+//										var adjQty = parent.adjQty
+//										var packSize = parent.packSize;
+//										var unitCost = parent.unitCost;
+										var line = parent.line;
+										var memo = parent.memo;
+//										var channel = parent.channel;
+//										var isParent = parent.isParent;
+//										var totalCost = parent.totalCost;
+										var newMemo = memo.toString()+' [SCR_UNPROCESSED_LINE]';
+										var newMemo2 = memo.toString()+' [SCR_UNPROCESSED_LINE][SCR_CHECK]';
+										
+										if (parent.qoh<1) {
+											invAdjRec.selectLineItem('inventory',line);
+											invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo2);
+											invAdjRec.commitLineItem('inventory');
+										} else {
+											invAdjRec.selectLineItem('inventory',line);
+											invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo);
+											invAdjRec.commitLineItem('inventory');
+										}
+										
+									} else if (res[m1].getValue('formulatext') == 0 && resObj!=null) {
+										child = new Object();
+										
+										child = createChildObj(resObj);
+										
+										child.line = getTrueLine(arrSublistLines,child.lineId);
+//										child.adjQty = parseFloat(invAdjRec.getLineItemValue('inventory','adjustqtyby',child.line));
+//										child.unitCost = parseFloat(invAdjRec.getLineItemValue('inventory','unitcost',child.line));
+//										child.packSize = invAdjRec.getLineItemValue('inventory','custcol_mb_item_pack_size',child.line);
+//										child.newQty = invAdjRec.getLineItemValue('inventory','newquantity',child.line);
+//										child.qoh = invAdjRec.getLineItemValue('inventory','quantityonhand',child.line);
+//										child.parent = invAdjRec.getLineItemValue('inventory','custcol_mb_item_parent',child.line)
+
+//										child.totalCost = parseFloat(child.unitCost*child.adjQty).toFixed(5)
+//										var item = child.item
+//										var location = child.location
+//										var adjQty = child.adjQty
+//										var packSize = child.packSize;
+//										var unitCost = child.unitCost;
+										var line = child.line;
+										var memo = child.memo;
+//										var channel = child.channel;
+//										var isParent = child.isParent;
+//										var totalCost = child.totalCost;
+										var newMemo = memo.toString()+'[SCR_UNPROCESSED_LINE]';
+										
+										invAdjRec.selectLineItem('inventory',line);
+										invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo);
+										invAdjRec.commitLineItem('inventory');
+										
+									}
+									continue;
+								}
+								continue;
+								
+							} else if (res.length == 2){
+								// logic to handle true pairs;
+								var parent = new Object();
+								var child = new Object();
+									
+								for (var k = 0; k<res.length; k++) {
+									var resObj = {
+										item : res[k].getValue('item'),
+										//adjQty : res[k].getValue('quantity'),
+										adjQtyType : res[k].getValue('quantity')>0 ? 'positive' : 'negative',
+										memo : res[k].getValue('memo'),
+										//totalCost : res[k].getValue('amount'),
+										location : res[k].getValue('location'),
+										lineId : parseFloat(res[k].getValue('line')),
+										//qoh : res[k].getValue('quantityohand'),
+										//newQty : res[k].getValue('newquantity'),
+										channel : res[k].getValue('class')
+									}
+									
+									if (res[k].getValue('formulatext') == 1 && resObj!=null){
+										//parent = new Object();
+										parent = createParentObj(resObj);
+										
+										parent.line = getTrueLine(arrSublistLines,parent.lineId);
+										parent.adjQty = parseFloat(invAdjRec.getLineItemValue('inventory','adjustqtyby',parent.line));
+										parent.unitCost = parseFloat(invAdjRec.getLineItemValue('inventory','unitcost',parent.line));
+										parent.packSize = invAdjRec.getLineItemValue('inventory','custcol_mb_item_pack_size',parent.line);
+										parent.parent = invAdjRec.getLineItemValue('inventory','custcol_mb_item_parent',parent.line)
+										parent.newQty = invAdjRec.getLineItemValue('inventory','newquantity',parent.line);
+										parent.qoh = invAdjRec.getLineItemValue('inventory','quantityonhand',parent.line);
+										
+										parent.totalCost = (parent.unitCost * parent.adjQty).toFixed(5);
+										
+									} else if (res[k].getValue('formulatext') == 0 && resObj!=null){
+										//child = new Object();
+										child = createChildObj(resObj);
+										
+										child.line = getTrueLine(arrSublistLines,child.lineId);
+										if (child.line==null) child.line = child.lineId;
+										child.adjQty = parseFloat(invAdjRec.getLineItemValue('inventory','adjustqtyby',child.line));
+										child.unitCost = parseFloat(invAdjRec.getLineItemValue('inventory','unitcost',child.line));
+										child.packSize = invAdjRec.getLineItemValue('inventory','custcol_mb_item_pack_size',child.line);
+										child.qoh = invAdjRec.getLineItemValue('inventory','quantityonhand',child.line);
+										child.parent = invAdjRec.getLineItemValue('inventory','custcol_mb_item_parent',child.line)
+
+										child.newQty = invAdjRec.getLineItemValue('inventory','newquantity',child.line);
+
+										child.totalCost = (child.unitCost * child.adjQty).toFixed(5);
+										
+									}
+								}
+								
+								if ((child == null || child =={}) || (parent == null || parent == {})) {
+									// if its a bad pair (2 children, 2 parents) continue;
+									continue;
+								}
+								
+								if ((parseFloat(parent.qoh) <= 0 || parseFloat(parent.unitCost) == 0)){
+									
+									var bins = getBins(invAdjRec,parent.line);
+									
+									var reason = null
+									
+									if (parent.qoh<=0 && parent.unitCost == 0){
+										reason ='both'
+									} else if (parent.qoh>0 && parent.unitCost == 0){
+										reason = 'cost'
+									} else if (parent.qoh<=0 && parent.unitCost!=0){
+										reason ='quantity'
+									}
+									
+									var binNum =''
+									
+									if (bins){
+										if (bins.length == 1){
+											binNum = bins[0].bin;
+										}
+									};
+									
+									if (reason == 'both' || reason == 'quantity') {
+										// build PD if the parent doesn't have enough quantity;
+										
+											usedInvAdj = true;
+											
+											var newParMemo = (parent.memo+' [SCR_SHORT]').toString();
+	//										nlapiLogExecution('debug','adding inv line',parent.line);
+											
+											newInvAdjRec.addInvLines(newInvAdj,parent.item,absVal(parent.adjQty),parent.channel, parent.location,absVal(parent.newCost).toFixed(5),bins,reason,resId,parent.memo,parent.packSize,parent.parent,createPDs);
+											
+											invAdjRec.selectLineItem('inventory',parent.line)
+											invAdjRec.setCurrentLineItemValue('inventory','memo',newParMemo);
+											invAdjRec.commitLineItem('inventory');
+											
+											custAuditRec.addLine(auditRec,parent.item,parent.qoh,parent.unitCost,parent.newQty,parent.newCost,resId,parent.line,true,newParMemo,parent.location,true);
+											adjCount = adjCount+1
+											
+										if (parent.location=='22'){
+											nlapiSendEmail(fromEmail,['Lucas@mibar.net','netsuite@mibar.net'],'PD needed for Dropship Item','Item: '+parent.item+' TranID: '+tranId+' Date: '+tranDate);
+										}
+									};
+									
+									if (reason == 'cost'|| reason =='both'){
+										// if the parent has a cost of 0, fetch avg cost;
+										
+										var arrAvgCost = getAvgLocationCost(parent.item,parent.location,tranDate,runDate2,binNum);
+										
+										if (typeof arrAvgCost == 'array' || typeof arrAvgCost =='object') {
+											var avgCost = parseFloat(arrAvgCost[0]);
+										} else {
+											var avgCost = 0;
+											nlapiLogExecution('error', 'Could not find average cost','For item: '+parent.item+', location: ',parent.location);
+										}
+										
+										if ((typeof arrAvgCost == 'array' || typeof arrAvgCost =='object')) {
+											memoAddOn = arrAvgCost[1].toString();
+										} else {
+											nlapiLogExecution('error', 'Could not find average cost','For item: '+parent.item+', location: ',parent.location);
+										}
+										
+										var newMemo = parent.memo;
+										
+										if (reason == 'both'){
+											newMemo += " [SCR_SHORT]"+" [SCR_COST]";
+										} else {
+											newMemo += " [SCR_COST]";
+										}
+										
+										if (avgCost!= null && avgCost != '') {
+											parent.newCost = avgCost.toFixed(5);
+										} else {
+											parent.newCost = 0;
+										}
+										
+										invAdjRec.selectLineItem('inventory',parent.line);
+										invAdjRec.setCurrentLineItemValue('inventory','unitcost',parent.newCost);
+										invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo);
+										invAdjRec.commitLineItem('inventory');
+										
+										parent.memo = parent.memo+memoAddOn;
+										
+										// add line for changing the parents cost
+										custAuditRec.addLine(auditRec,parent.item,parent.qoh,parent.unitCost,parent.newQty,parent.newCost, resId, parent.line,true,newMemo,parent.location,false);
+										
+										costCount = costCount+1
+										
+										parent.unitCost = parseFloat(parent.newCost).toFixed(5);
+										
+										parent.totalCost = (parent.unitCost*parent.adjQty).toFixed(5);
+										
+									}
+								}	
+								
+								if (absVal(parent.totalCost)!=absVal(child.totalCost)){
+									// if the pair is incongruent, adjust the child's cost;
+									child.newCost = absVal(parent.unitCost*child.packSize);
+									
+									var line = child.line;
+									if (child.line==null){
+										custAuditRec.addSiloLines(auditRec,resId,child.item,child.location,child.adjQty,child.packSize,child.line,child.memo,child.channel,child.isParent,child.totalCost);
+										continue;
+									}
+									var newMemo = child.memo+=" [SCR_COST]";
+									
+									if (parseFloat(child.newCost) != 0){
+										
+										invAdjRec.selectLineItem('inventory', line);
+										invAdjRec.setCurrentLineItemValue('inventory','unitcost',child.newCost.toFixed(5))//,child.line);
+										invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo)//,child.line);
+										
+										invAdjRec.commitLineItem('inventory')//,child.line);
+										
+									}
+									
+									var remainingUsage = nlapiGetContext().getRemainingUsage()
+									
+									if (remainingUsage<= MINIMUM_USAGE) {
+									    nlapiLogExecution('AUDIT', 'Scheduling Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//										var scriptId = nlapiGetContext().getScriptId();
+//										var status = nlapiScheduleScript(scriptId);
+//						    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+										throw usageError;
+									}
+
+									custAuditRec.addLine(auditRec,child.item,child.qoh,child.unitCost,child.newQty,child.newCost.toFixed(5),resId, child.line,false,child.memo,child.location,false);
+									
+									costCount = costCount+1
+									continue;
+								}
+							} else if (res.length>2 && res.length % 2 == 0) {
+								// if its multiple parents and children;
+								
+								var arrParent = new Array();
+								var arrChild = new Array();
+								
+								// create parent and child objects for comparison 
+								for (var m = 0; m<res.length; m++) {
+									var itemLocConcat ='';
+									
+									var resObj = {
+										item : res[m].getValue('item'),
+										//adjQty : res[k].getValue('quantity'),
+										adjQtyType : res[m].getValue('quantity')>0 ? 'positive' : 'negative',
+										memo : res[m].getValue('memo'),
+										//totalCost : res[k].getValue('amount'),
+										location : res[m].getValue('location'),//res[m].getValue('location'),
+										lineId : parseFloat(res[m].getValue('line')),
+										//qoh : res[k].getValue('quantityohand'),
+										//newQty : res[k].getValue('newquantity'),
+										channel : res[m].getValue('class')
+									}
+
+									if (res[m].getValue('formulatext') == 1 && resObj!=null){
+										var parent = new Object();
+										
+										parent = createParentObj(resObj);
+										
+										parent.line = getTrueLine(arrSublistLines,parent.lineId);
+										parent.adjQty = parseFloat(invAdjRec.getLineItemValue('inventory','adjustqtyby',parent.line));
+										parent.unitCost = parseFloat(invAdjRec.getLineItemValue('inventory','unitcost',parent.line));
+										parent.packSize = invAdjRec.getLineItemValue('inventory','custcol_mb_item_pack_size',parent.line);
+										parent.qoh = invAdjRec.getLineItemValue('inventory','quantityonhand',parent.line);
+										parent.newQty = invAdjRec.getLineItemValue('inventory','newquantity',parent.line);
+										parent.parent = invAdjRec.getLineItemValue('inventory','custcol_mb_item_parent',parent.line)
+										parent.totalCost = parseFloat(parent.unitCost * parent.adjQty).toFixed(5);
+										
+										parent.updateVal = parent.item.toString()+parent.location.toString();
+
+										arrParent.push(parent)
+										
+									} else if (res[m].getValue('formulatext') == 0 && resObj!=null){
+										var child = new Object();
+										
+										child = createChildObj(resObj);
+										
+										child.line = getTrueLine(arrSublistLines,child.lineId);
+										child.adjQty = parseFloat(invAdjRec.getLineItemValue('inventory','adjustqtyby',child.line));
+										child.unitCost = parseFloat(invAdjRec.getLineItemValue('inventory','unitcost',child.line));
+										child.packSize = invAdjRec.getLineItemValue('inventory','custcol_mb_item_pack_size',child.line);
+										child.newQty = invAdjRec.getLineItemValue('inventory','newquantity',child.line);
+										child.qoh = invAdjRec.getLineItemValue('inventory','quantityonhand',child.line);
+										child.parent = invAdjRec.getLineItemValue('inventory','custcol_mb_item_parent',child.line)
+
+										child.totalCost = parseFloat(child.unitCost*child.adjQty).toFixed(5)
+										
+										arrChild.push(child)
+										
+									}
+								}
+								// check parent and child array lengths and then begin processing  
+								if (arrParent.length!=arrChild.length){
+									// no longer needed as 5025 fixer is handling uneven parent child groupings;
+									continue;
+									
+								} else {
+
+									var arrToUpdate = new Array();
+
+									var firstCost = 0;
+									var memoAddOn;
+									
+									// checking costs / quantities
+									for (p=0;p<arrParent.length;p++){
+										if (arrParent[p].unitCost!=0 && (firstCost==0|| firstCost==null)){
+											firstCost = arrParent[p].unitCost;
+										} 
+									}
+									
+									var flag = (arrParent[0].qoh<=0 || firstCost == 0) ? true : false;
+									
+									if (firstCost==0){
+										// if the parents do not have a cost get the cost and set it for the parents;
+										var arrAvgCost = getAvgLocationCost(parent.item,parent.location,tranDate,runDate2,null)
+										
+										if (typeof arrAvgCost == 'array' || typeof arrAvgCost =='object') {
+											var avgCost = parseFloat(arrAvgCost[0]);
+										} else {
+											var avgCost = 0;
+											nlapiLogExecution('error', 'Could not find average cost','For item: '+parent.item+', location: ',parent.location);
+										}
+										
+										if ((typeof arrAvgCost == 'array' || typeof arrAvgCost =='object')) {
+											memoAddOn = arrAvgCost[1].toString();
+										} else {
+											nlapiLogExecution('error', 'Could not find average cost','For item: '+parent.item+', location: ',parent.location);
+										}
+										if (avgCost!=null || avgCost!='') {
+											firstCost = parseFloat(avgCost).toFixed(5);
+										}
+										
+									}
+									
+									if (flag==true){
+										// the parents either need inventory, or need their costs adjusted do so below;
+										for (l=0;l<arrParent.length;l++){
+											
+											var parent = arrParent[l];
+											var newMemo = parent.memo;
+                                          
+											if (newMemo.search('[SCR_SHORT]')!=-1) continue;
+											if (newMemo.search('[SCR_COST]')!=-1) continue;
+											
+											var correctCost = parent.unitCost==firstCost ? true : false;
+											
+											var bins = getBins(invAdjRec,parent.line);
+											
+											var reason = null
+											
+											if (parent.qoh<=0 && correctCost == false){
+												reason='both';
+												parent.newCost = firstCost;
+											} else if (parent.qoh>0 && correctCost == false){
+												reason = 'cost';
+												parent.newCost = firstCost;
+											} else if (parent.qoh<=0 && correctCost ==true){
+												reason='quantity';
+												parent.newCost = parent.unitCost;
+											} 
+											
+											if (reason == 'both'|| reason == 'quantity') {
+													usedInvAdj = true;
+													
+													var newParMemo = (parent.memo+' [SCR_SHORT]').toString();
+	
+													newInvAdjRec.addInvLines(newInvAdj,parent.item,absVal(parent.adjQty),parent.channel, parent.location,absVal(parent.newCost).toFixed(5),bins,reason,resId,parent.memo,parent.packSize,parent.parent,createPDs);
+													
+													invAdjRec.selectLineItem('inventory',parent.line)
+													invAdjRec.setCurrentLineItemValue('inventory','memo',newParMemo);
+													invAdjRec.commitLineItem('inventory');
+													
+													custAuditRec.addLine(auditRec,parent.item,parent.qoh,parent.unitCost,parent.newQty,parent.newCost,resId,parent.line,true,newParMemo,parent.location,true);
+													adjCount = adjCount+1
+													
+												if (parent.location=='22'){
+													nlapiSendEmail(fromEmail,['Lucas@mibar.net','netsuite@mibar.net'],'PD  created for Dropship Item','Item: '+parent.item+' TranID: '+tranId+' Date: '+tranDate);
+												}
+											}
+											
+											if (reason == 'cost' || reason=='both'){
+												
+												if (reason == 'both'){
+													newMemo += " [SCR_SHORT]"+" [SCR_COST]";
+												} else {
+													newMemo += " [SCR_COST]";
+												}
+												
+												parent.newCost = firstCost;
+												
+												invAdjRec.selectLineItem('inventory',parent.line);
+												invAdjRec.setCurrentLineItemValue('inventory','unitcost',parent.newCost);
+												invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo);
+												invAdjRec.commitLineItem('inventory');
+												
+												parent.memo = parent.memo+memoAddOn;
+												
+												custAuditRec.addLine(auditRec,parent.item,parent.qoh,parent.unitCost,parent.newQty,parent.newCost,resId,parent.line,true,newMemo,parent.location,false);
+												
+												costCount = costCount+1
+												
+												parent.unitCost = parent.newCost;
+												parent.totalCost = (parent.unitCost*parent.adjQty);
+											}
+											
+											bins = new Array();
+										}
+
+									}
+									// check child unit costs against the cost from the parents 
+									
+									for (a=0;a<arrChild.length;a++){
+										
+										arrChild[a].trueCost = arrChild[a].unitCost/arrChild[a].packSize
+										
+										if (arrChild[a].trueCost!=firstCost){
+											arrToUpdate.push(arrChild[a]);
+										}
+									}
+									
+									//update child lines which need to have the unit cost changed 
+									
+									if (arrToUpdate.length!=0){
+										
+										for (b=0;b<arrToUpdate.length;b++){
+											
+											var child = arrToUpdate[b];
+											
+											child.newCost = parseFloat(parseFloat(firstCost)*parseFloat(child.packSize))
+											
+											var line = child.line
+											var newMemo = child.memo.split(' [SCR_COST]')[0]+=" [SCR_COST]";
+											
+											if (parseFloat(child.newCost) != 0){
+												
+												invAdjRec.selectLineItem('inventory',line);
+												invAdjRec.setCurrentLineItemValue('inventory','unitcost',child.newCost.toFixed(5));
+												invAdjRec.setCurrentLineItemValue('inventory','memo',newMemo);
+												
+												invAdjRec.commitLineItem('inventory')
+												
+											}
+											
+											var remainingUsage = nlapiGetContext().getRemainingUsage()
+											if (remainingUsage<= MINIMUM_USAGE) {
+											    nlapiLogExecution('AUDIT', 'Scheduling Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//												var scriptId = nlapiGetContext().getScriptId();
+//												var status = nlapiScheduleScript(scriptId);
+//								    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+								    			throw usageError;
+											}
+											
+											
+											custAuditRec.addLine(auditRec,child.item,child.qoh,child.unitCost,child.newQty,child.newCost.toFixed(5),resId, child.line,false,child.memo,child.location,false);
+											costCount = costCount+1;
+											
+											continue;
+										}
+									}
+								}
+							}
+						} else {
+							continue;
+						}
+					} else {
+						continue;
+					}	
+				};
+				
+				var remainingUsage = nlapiGetContext().getRemainingUsage()
+				//nlapiLogExecution('audit','remaining usage',remainingUsage)
+				if (remainingUsage<= MINIMUM_USAGE) {
+				    nlapiLogExecution('AUDIT', 'Scheduling Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//					var scriptId = nlapiGetContext().getScriptId();
+//					var status = nlapiScheduleScript(scriptId);
+//					nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+					throw usageError;
+				}
+				
+				var headerToSet = '';
+				if (finished==false){
+					// if you didn't get through the full record set endpoint value;
+					var preEndPointMemo = oldHeaderMemo.split('#EndPoint:');
+					headerToSet = preEndPointMemo[0]+', #[SCR_COST]:'+costCount+' #[SCR_SHORT]:'+adjCount+', #EndPoint: '+end;
+				} else {
+					headerToSet = oldHeaderMemo.split('#EndPoint:')[0]+' [SCR_COST] changed: '+costCount +', [SCR_SHORT] changed: '+adjCount;
+					invAdjRec.setFieldValue('custbody_mb_linked_audit_rec',auditRec)
+				}
+				
+				invAdjRec.setFieldValue('memo',headerToSet);
+				var newTotalVal = invAdjRec.getFieldValue('estimatedtotalvalue');
+				invAdjRec.setFieldValue('custbody_mb_script_est_value',newTotalVal);
+				
+				try {
+					// try and submit the record - if the unexpected error occurs, reschedule the script. If it is a bin error, send email alert, if it is a different error throw error;
+					var submit = nlapiSubmitRecord(invAdjRec);
+					submitCt = submitCt+1
+				} catch(err){
+					nlapiSendEmail(fromEmail, ['Lucas@mibar.net'], 'Error In submitting inv adj rec', 'Please check the execution log and restart the script');
+					//var submit = nlapiSubmitRecord(invAdjRec);
+			        nlapiLogExecution('debug','error submitting inv record',submit);
+			        nlapiLogExecution("error", "suiteScript has encountered an error.", JSON.stringify(err));
+					var scriptId = nlapiGetContext().getScriptId();
+					var status = nlapiScheduleScript(scriptId);
+					nlapiLogExecution('debug','Scheduled script status',status);
+					
+					if (err instanceof nlobjError){
+						if (err.getCode() == 111){
+							throw usageError;
+						} else if (err.getCode()=='USER_ERROR'){
+							var details = err.getDetails();
+//							nlapiLogExecution('debug','error details', details);
+							if (details.search('The following Bin numbers are not available: ')!=-1){
+								var bins = details.split('available:')[1];
+								if (bins.search(',')!=-1){
+									var bins = bins.split(',');
+								};
+								throw nlapiCreateError('BIN_ERROR','Check Bins and fixDaysNegBins execution'+bins.toString(),true);
+							};
+                        } else if (err.getCode()=='PLEASE_CONFIGURE_THE_INVENTORY_DETAIL_FOR_1'){
+                          	nlapiLogExecution('error','INVENTORY DETAIL ERROR, KILLING SCRIPT, Not Actually Restarting, Error: '+JSON.stringify(err));
+                          	throw restartError; 
+                        } else {
+                          	throw nlapiCreateError('666',errText(err),true)
+                        }
+					}
+				};
+				nlapiLogExecution('debug','submitted inv record',submit);
+
+				if (createPDs != 'F' && createPDs != false){
+					// create memo for the PD and submit the PD;
+					if (usedInvAdj == true){
+	//					if (newInvAdj!=null && newInvAdj!='') {
+						var newLineCt = newInvAdj.getLineItemCount('inventory');
+						var increased = 0;
+						var decreased = 0;
+						for (g=1;g<=newLineCt;g++){
+							if (newInvAdj.getLineItemValue('inventory','adjustqtyby',g)>0){
+								increased = increased+1;
+							} else {
+								decreased = decreased+1
+							}
+						}
+						var a = newInvAdj.getFieldValue('tranid').substr(0,9)
+						var b = "Total # Items "+ newLineCt;
+						var c = " (Increased : "+increased;
+						var d = ", Decreased : "+decreased+')';
+						
+						var newInvMemo = a+b+c+d;
+						
+						newInvAdj.setFieldValue('memo',newInvMemo);
+						
+						try {
+							newInv = nlapiSubmitRecord(newInvAdj);
+						} catch(err){
+							nlapiSendEmail(fromEmail, ['Lucas@mibar.net','netsuite@mibar.net'], 'Error In submitting PD inv adj rec', 'Please check the execution log and restart the script');
+							newInv = nlapiSubmitRecord(newInvAdj);
+					        nlapiLogExecution('debug','submitting newInv record',newInv);
+					        nlapiLogExecution("error", "suiteScript has encountered an error.", JSON.stringify(err));
+							if (err instanceof nlobjError){
+								if (err.getCode() == 111){
+									throw usageError;
+								}
+							}
+						}
+						nlapiLogExecution('debug','submitted pd inv adj',newInv);
+					}
+				}
+				
+				if (costCount+adjCount==0 && origTotalValue>0){
+					// send email if the record was unprocessed;
+					emailBody+= "Unprocessed Record ID: "+ tranId +" \n";
+				};
+				
+			    if (emailBody != '') {
+			    	body = 'Please review the unprocessed records below: \n' + emailBody;
+				    nlapiSendEmail(fromEmail, toEmail, emailSubject, body);
+			    };
+				
+				if (createPDs!='F' && createPDs!=false){
+					if (usedInvAdj == true && newInv!='') newInvAdj = '';
+				}
+					
+				if(nlapiLookupField(custAuditRec.entityName,auditRec,'custrecord_mb_attached_inv_adj')==''){
+					// add new inventory adjustment to the audit record;
+					nlapiSubmitField("customrecord_mb_inv_adj_audit",auditRec,'custrecord_mb_attached_inv_adj',newInv);
+				}
+				
+				if (finished==false){
+					// restart script from endpoint if the record was unfinished;
+					var scriptId = nlapiGetContext().getScriptId();
+					var status = nlapiScheduleScript(scriptId);
+					nlapiLogExecution('AUDIT','Scheduled Script Status',status);
+					nlapiLogExecution('debug','restarting script from endpoint');
+					throw nlapiCreateError('ENDPOINT_RESTART','Restarting script from endpoint',true);
+				}
+				
+				if (restart==true){
+					// restart the script if it processed a full record;
+				    throw restartError;
+				    
+				}
+			}
+			
+			var setPref = setPreference(runDate2);
+			nlapiLogExecution('debug','setPref',setPref);
+			
+			if (setPref=='Success') {
+				if (runDate2!=''&& runDate2!=null){
+					nlapiLogExecution('debug','Date for 5025 fixer to Process',runDate2);
+					var scriptId = 'customscript_mb_sched_fix_5025_inv_adj'//nlapiGetContext().getScriptId();
+					var status = nlapiScheduleScript(scriptId,null,[{'custscript_mb_first_date_fix':runDate2},{'custscript_mb_second_date_fix':runDate2}]);
+					nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+				};
+			} else {
+				nlapiSendEmail('1423',['Lucas@mibar.net','netsuite@mibar.net'],'Error triggering fix 5025','Check execution and manually fire if needed');
+			}
+			
+			if (internalId==null || internalId==''){
+				nlapiSendEmail(fromEmail,['Lucas@mibar.net','netsuite@mibar.net'],'Finished first 5025 script, starting second', 'Date '+runDate+', Starting Second 5025 script for same date');
+			}
+			
+		} else {
+			nlapiSendEmail(fromEmail,['Lucas@mibar.net'],'No search for 5025 script', 'Check execution and update teamwork task');
+		}
+	} catch (err) {	    
+		nlapiLogExecution('debug','Err',JSON.stringify(err));
+		
+		if (err instanceof nlobjError){
+			if (err.getCode() == 111){
+				if (submitCt==0){
+					nlapiSendEmail(fromEmail, ['Lucas@mibar.net','netsuite@mibar.net'], 'Base Script is stuck on a record.','Please check the execution log & restart the script n/ Error: '+ JSON.stringify(err));
+					nlapiLogExecution('AUDIT','Could not finish processing record','Rescheduling with less records');
+					var scriptId = nlapiGetContext().getScriptId();
+					var status = nlapiScheduleScript(scriptId,null,{'custscript_mb_num_lines':'100'});
+					nlapiLogExecution('audit','status and num lines to process',status+' Number of Lines to process next go: '+100);
+					throw usageError;
+				} else {
+					nlapiLogExecution('AUDIT','Hit Usage Limit','Rescheduling');
+					var scriptId = nlapiGetContext().getScriptId();
+					var status = nlapiScheduleScript(scriptId);
+					nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+					throw usageError;
+				};
+			} else if (err.getCode()=='FINISHED_REC') {
+				nlapiLogExecution('Audit','Finished Record, rescheduling');
+				var scriptId = nlapiGetContext().getScriptId();
+				var status = nlapiScheduleScript(scriptId);
+				nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+			} else if (err.getCode() == 'ENDPOINT_RESTART'){
+				nlapiLogExecution('audit','restarting from endpoint');
+			} else if (err.getCode() == 'BREAK_FOR_SQL'){
+				var dt = new Date();
+				nlapiSendEmail('1423',['Lucas@mibar.net','netsuite@mibar.net'],'Broke first 5025 script to pause for SQL refresh','Break Occurred At TimeStamp:'+dt);
+				throw timeError;
+			} else if (err.getCode()=='BIN_ERROR'){
+				nlapiSendEmail('1423',['Lucas@mibar.net','netsuite@mibar.net'],'Bin Error, stopping execution','Bin Error on record: '+resId+' , stopping execution, please debug and reschedule');
+				throw nlapiCreateError('BIN_ERROR','Bin Error on '+resId+' , killing script',true)
+			} else {
+				nlapiLogExecution("error", "suiteScript has encountered an error.", JSON.stringify(err));
+				nlapiSendEmail(fromEmail, ['Lucas@mibar.net','netsuite@mibar.net'], 'Error In 5025 Base Script','Please check the execution log & restart the script n/ Error: '+ JSON.stringify(err));
+			};
+		} else {
+			nlapiLogExecution("error", "suiteScript has encountered an error.", JSON.stringify(err));
+			nlapiSendEmail(fromEmail, ['Lucas@mibar.net','netsuite@mibar.net','netsuite@mibar.net'], 'Error In 5025 Base Script','Please check the execution log & restart the script n/ Error: '+ JSON.stringify(err));
+		}
+    }
+};
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var custAuditRec = {
+		entityName: "customrecord_mb_inv_adj_audit",
+		//recordId : "",
+		insertRecord : function(tranDate){
+			var date = getDate(tranDate,0);
+			
+			try{
+				var custRec = nlapiCreateRecord(this.entityName, {recordmode: 'dynamic'});
+				custRec.setFieldValue('name','Balance Inv Adj Script Ran on: ' + date)
+				custRec.setFieldValue('custrecord_mb_runtime_date', date) // tran date
+				var recordId = nlapiSubmitRecord(custRec);
+			} catch(e){
+            	nlapiLogExecution("error", "Insert Audit Record Error", errText(e));
+            	var recordId = nlapiSubmitRecord(custRec);
+			};
+			//nlapiLogExecution('debug','audit rec id',recordId)
+			
+			return recordId;
+		},
+		
+		addSiloLines : function(rcdId,invRec,item,location,adjQty,packSize,unitCost,line,memo,channel,isParent,totalCost){
+		    var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+		    	
+		        try{
+		        	
+		        	var breakScript =false;
+		    		var remainingUsage = nlapiGetContext().getRemainingUsage()
+		    		//nlapiLogExecution('audit','remaining usage - in silo lines',remainingUsage)
+		    		if (remainingUsage<= MINIMUM_USAGE) {
+		    		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+		    			var scriptId = nlapiGetContext().getScriptId();
+		    			var status = nlapiScheduleScript(scriptId);
+		    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+		    			throw usageError;
+		    			breakScript = true;
+		    		}
+		   
+		    		var arrParam = new Array();
+		    		
+					arrParam['custparam_item'] = item;
+					arrParam['custparam_location'] = location;
+					arrParam['custparam_channel'] = channel;
+					arrParam['custparam_auditid'] = rcdId;
+					arrParam['custparam_memo'] = memo;
+					arrParam['custparam_invadj'] = invRec;
+					arrParam['custparam_adjqty'] = adjQty;
+					arrParam['custparam_line'] = line;
+					arrParam['custparam_totalcost'] = totalCost;
+					arrParam['custparam_isparent'] = isParent;
+					arrParam['custparam_oldcost'] = unitCost;
+					arrParam['custparam_packsize'] = packSize;
+					arrParam['custparam_type'] = 'silo';
+//					
+					if(memo!=null){
+						try {
+							var strMemo = memo.toString();
+							//nlapiLogExecution('debug','strmemo val',strMemo);
+							//nlapiLogExecution('debug','strmemo type',typeof strMemo);
+							var split1 = strMemo.split('invoice');
+							//nlapiLogExecution('debug','val',split1);
+
+							if (split1!=null) var split2 = split1[1].split('is');
+				    		if (split2!=null) var invoice = split2[0];
+							if (invoice!=null) arrParam['custparam_invoice'] = invoice;
+						} catch(err){
+//							nlapiLogExecution('debug','issue splitting memo');
+							arrParam['custparam_invoice'] = ''
+						}
+
+						//nlapiLogExecution('debug','invoice',arrParam['custparam_invoice'])
+					} else {
+						arrParam['custparam_invoice'] = ''
+					}
+					//nlapiLogExecution('debug','arrparam',arrParam.length);
+					
+					var url = nlapiResolveURL('SUITELET','customscript_mb_suitelet_build_auditline','customdeploy_mb_build_audit_lines','external');
+					var response = nlapiRequestURL(url,arrParam);
+					
+					var result = response.getBody();
+					
+					//nlapiLogExecution('debug','silo line result',result);
+					
+		        } catch(e){
+					if (e instanceof nlobjError){
+						if (e.getCode() == 111){
+							throw usageError;
+						}
+					}
+		        	var error = errText(e);
+		        	nlapiLogExecution("error","suiteScript has encountered an error.",error);
+		        }
+		},
+		// update audit lines to reflect that parent adjustment has been submitted after
+
+		updateLines : function(invAdj,auditRec){
+			// offloaded to Update Lines Scheduled Script
+		},
+		
+		addLine : function(rcdId, item, oldQ, oldCost, newQ,newCost,invRec,line,isParent,memo,location,isPD){
+		    var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+
+		        try{
+		        	
+		    		//nlapiLogExecution('audit','remaining usage -- in add line',remainingUsage)
+		        	var remainingUsage = nlapiGetContext().getRemainingUsage();
+		        	
+		    		if (remainingUsage<= MINIMUM_USAGE) {
+		    		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+		    			var scriptId = nlapiGetContext().getScriptId();
+		    			var status = nlapiScheduleScript(scriptId);
+		    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+		    			throw usageError;
+		    		}
+//		    		nlapiLogExecution('debug','isParent',isParent);
+		    		var arrParam = new Array();
+					arrParam['custparam_item'] = item;
+					arrParam['custparam_auditid'] = rcdId;
+					arrParam['custparam_memo'] = memo;
+					arrParam['custparam_invadj'] = invRec;
+					arrParam['custparam_line'] = line;
+					arrParam['custparam_isparent'] = isParent;
+					arrParam['custparam_oldcost'] = oldCost;
+					arrParam['custparam_newcost'] = newCost;
+					arrParam['custparam_oldq'] = oldQ;
+					arrParam['custparam_newq'] = newQ;
+					arrParam['custparam_type'] = 'cost';
+					arrParam['custparam_fix5025'] = 'F';
+					arrParam['custparam_add_remove'] = '';
+					arrParam['custparam_ispd'] = isPD;
+					
+					if(memo!=null){
+						try {
+							var strMemo = memo.toString();
+							//nlapiLogExecution('debug','strmemo val',strMemo);
+							//nlapiLogExecution('debug','strmemo type',typeof strMemo);
+							var split1 = strMemo.split('invoice');
+							//nlapiLogExecution('debug','val',split1);
+
+							if (split1!=null) var split2 = split1[1].split('is');
+				    		if (split2!=null) var invoice = split2[0];
+							if (invoice!=null) arrParam['custparam_invoice'] = invoice;
+						} catch(err){
+							nlapiLogExecution('debug','issue splitting memo');
+							arrParam['custparam_invoice'] = ''
+						}
+
+						//nlapiLogExecution('debug','invoice',arrParam['custparam_invoice'])
+					} else {
+						arrParam['custparam_invoice'] = ''
+					}
+					
+					//nlapiLogExecution('debug','arrparam cost',arrParam.length);
+					
+					var url = nlapiResolveURL('SUITELET','customscript_mb_suitelet_build_auditline','customdeploy_mb_build_audit_lines','external');
+
+					var response = nlapiRequestURL(url,arrParam);
+					
+					var result = response.getBody();
+					
+					//nlapiLogExecution('debug','add line result',result);
+   	
+		        } catch(err){
+					if (err instanceof nlobjError){
+						if (err.getCode() == 111){
+							throw usageError;
+						}
+					}
+		        	var error = errText(err);
+		        	nlapiLogExecution("error","Error creating Audit Lines",JSON.stringify(error));
+		        }
+		},
+		
+		checkLines : function(auditRec,arrComplete,arrIncomplete){
+			// offloaded to other scheduled script
+		}
+}
+
+// get cost if needed 
+function getAvgLocationCost(item,location,tranDate,runDate2,bin){ 
+	
+	try{	
+	//	try {
+		var getFromSearch = nlapiGetContext().getSetting('SCRIPT', 'custscript_mb_avg_cost_search');// get from search or function
+		var avgCostSearch = 'customsearch_mb_inventory_valuation_dt_4';
+		var firstDate ='';
+		
+		if (tranDate.toString().search('2019')!=-1){
+			firstDate= '12/31/2018'
+		} else {
+			firstDate = '12/31/2017';
+		};
+		
+		if (getFromSearch =='T' || getFromSearch ==true){
+			
+			try {
+
+				var filters = new Array();
+				filters.push(new nlobjSearchFilter('item',null,'anyof',item));
+				filters.push(new nlobjSearchFilter('location',null,'anyof',location));
+				if (bin!='' && bin!=null && parseFloat(bin)!='NaN') filters.push(new nlobjSearchFilter('internalid','binNumber','anyof',bin));
+				if (firstDate!='') filters.push(new nlobjSearchFilter('trandate',null,'onorafter',firstDate));
+				filters.push(new nlobjSearchFilter('trandate',null,'onorbefore',tranDate));
+
+				var columns2 = new Array();
+				columns2.push(new nlobjSearchColumn('lastpurchaseprice','item',null));
+				columns2.push(new nlobjSearchColumn('cost','item',null));
+				columns2.push(new nlobjSearchColumn('internalid','binNumber',null));
+				columns2.push(new nlobjSearchColumn('tranid'));
+	        	var remainingUsage = nlapiGetContext().getRemainingUsage();
+	        	
+	    		if (remainingUsage<= MINIMUM_USAGE) {
+	    		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+	    			var scriptId = nlapiGetContext().getScriptId();
+	    			var status = nlapiScheduleScript(scriptId);
+	    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+	    			throw usageError;
+	    		}
+	    		
+				try {		
+					var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_4','Inventory Valuation Search for Cost',filters,'T',columns2,'T',null);
+					var avgCostSea = arrSearch[0];
+					var columns = arrSearch[1];
+					
+				} catch(err){
+					nlapiLogExecution('error','caught error in nlapiSearchRecord Block', JSON.stringify(err));
+					avgCostSea = null;
+				}
+				
+				if (avgCostSea!=null){
+					//var cols = avgCostSea[1];
+					var results = avgCostSea;
+					
+					if (results){
+						var resNum = ''
+							for (n=0;n<results.length;n++){
+								if (results[n].getValue('tranid').search('inv_adj_script')==-1){
+									resNum = n;
+									break;
+								} else {
+									continue;
+								}
+							};
+							
+						if (resNum == '') resNum = 0;
+						
+						var res = results[resNum];
+						var fifoCost = res.getValue(columns[5]);
+						var currAvgCost = res.getValue(columns[6]);
+						var itemLpp = res.getValue('lastpurchaseprice','item');
+						var purchasePrice = res.getValue('cost','item');
+						var costs = [fifoCost,currAvgCost,itemLpp,purchasePrice];
+						var sources = ['[FIFO]','[CURR AVG COST]','[ITEM LPP]','[ITEM PP]']; //fifo cost from search,avg cost from search, item lpp, item purchase price
+						for (p=0;p<costs.length;p++){
+							var cost=''
+							if ((costs[p]!=0 && costs[p]!=null && costs[p]!='') && costs[p].indexOf('ERROR')==-1){
+								var toReturn = [costs[p],sources[p]];
+								cost = costs[p];
+								source = sources[p]
+								return toReturn;
+							} else if (p==costs.length-1 && cost==''){
+								throw nlapiCreateError('999','No valid results for cost in search results',true);
+							}
+						} 
+					} else {
+						throw nlapiCreateError('999','Did not find any results for cost',true);
+					}
+				}
+	
+			} catch(err){
+
+				nlapiLogExecution('error','Could not find avg cost from search for item',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+				// fill in vals for nlapiSendEmail('')
+				fromEmail = '1423'
+				toEmail = ['lucas@mibar.net','netsuite@mibar.net']
+				emailSubject = 'Issue Finding Avg Cost'
+				emailBody = 'Could not find average cost with the details below \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location+', bin: '+bin+'.';
+				sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+				return [0,'COULD NOT FIND COST'];
+				if (err instanceof nlobjError){
+					if (err.getCode() == 111){
+						throw usageError;
+					}
+				}
+			}
+			
+		} else if (getFromSearch =='F'||getFromSearch==false){
+			try {
+				var cost = '';
+				var type = nlapiLookupField('item',item,'recordType');
+				
+				var filters = new Array()
+				filters.push(new nlobjSearchFilter('item',null,'anyof',item));
+				filters.push(new nlobjSearchFilter('location',null,'anyof',location));
+				filters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+				filters.push(new nlobjSearchFilter('memo',null,'doesnotcontain','[SCR'));
+				filters.push(new nlobjSearchFilter('trandate',null,'onorbefore',tranDate));
+				filters.push(new nlobjSearchFilter('quantity',null,'lessthan','0'));
+				
+				var columns = new Array();
+				columns.push(new nlobjSearchColumn('trandate').setSort(true))
+				//columns.push(new nlobjSearchColumn('costestimaterate'));
+				columns.push(new nlobjSearchColumn('rate'));
+				//columns.push(new nlobjSearchColumn('lastpurchaseprice'))
+				
+				var remainingUsage = nlapiGetContext().getRemainingUsage()
+				//nlapiLogExecution('audit','remaining usage',remainingUsage)
+				if (remainingUsage<= MINIMUM_USAGE) {
+				    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+					var scriptId = nlapiGetContext().getScriptId();
+					var status = nlapiScheduleScript(scriptId);
+					nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+					throw usageError;
+				}
+				
+				var search = nlapiSearchRecord('inventoryadjustment',null,filters, columns);
+				
+				var src = '';
+					
+				if (search) {
+					
+					for (q = 0;q<search.length;q++){
+						cost = search[q].getValue('rate');
+						if (cost!=0 && cost!='' && cost!=null){
+							src = ' [Inv_Adj]'
+							return [cost,src];
+						}
+					}
+					
+				} else if (location== '12' || location == '13'|| location == '11'){
+					
+					var filters1 = new Array();
+					
+					filters1.push(filters[0]);
+					filters1.push(filters[2]);
+					filters1.push(filters[3]);
+					filters1.push(filters[4]);
+					filters1.push(filters[5]);
+					filters1.push(new nlobjSearchFilter('location',null,'anyof',['12','11','13']));
+					search = nlapiSearchRecord('inventoryadjustment',null,filters1, columns);
+					if (search) {
+						for (q = 0;q<search.length;q++){
+							cost = search[q].getValue('rate');
+							if (cost!=0 && cost!='' && cost!=null){
+								src = ' [Inv_Adj]'
+								return [cost,src];
+							}
+						}
+					} 
+				};
+				
+				if (cost==''){
+					
+					var filters2 = new Array();
+					filters2.push(filters[0]);
+					filters2.push(filters[1]);
+					filters2.push(filters[2]);
+					filters2.push(filters[4]);
+					
+					var columns2 = new Array()
+					columns2.push(new nlobjSearchColumn('trandate').setSort(true));
+					columns2.push(new nlobjSearchColumn('rate'));
+					
+					var rcptSearch = nlapiSearchRecord('itemreceipt',null,filters2,columns2);
+					
+					if (rcptSearch){
+						//nlapiLogExecution('debug','rcpt length',rcptSearch.length)
+						for (w=0;w<rcptSearch.length;w++){
+							//nlapiLogExecution('debug','rcpt sr',JSON.stringify(rcptSearch[w]))
+							cost = rcptSearch[w].getValue('rate');
+							if (cost!=0 && cost!='' && cost!=null){
+								src = ' [Item_Rcpt]'
+								return [cost,src];
+							}
+						}
+					} 
+				}; 
+				
+				if (cost==''){
+					var filters3 = new Array();
+					filters3.push(new nlobjSearchFilter('internalid',null,'anyof',item));
+					filters3.push(new nlobjSearchFilter('inventorylocation',null,'anyof',location));
+					//filters3.push(filters[2])
+					
+					var columns3 = new Array();
+					columns3.push(new nlobjSearchColumn('locationaveragecost'));
+					columns3.push(new nlobjSearchColumn('lastpurchaseprice'));
+					
+					var itemSearch = nlapiSearchRecord('item',null,filters3,columns3);
+					
+					if (itemSearch){
+						var result = itemSearch[0]
+						var avgCost = result.getValue('locationaveragecost');
+						var lpp = result.getValue('lastpurchaseprice');
+						
+						if (avgCost!=0 && avgCost !='' && avgCost !=null){
+							src = ' [Item_Rec_Avg]'
+							cost = avgCost;
+							return [avgCost,src];
+						} else if (lpp!=0 && lpp!='' && lpp !=null) {
+							src = ' [Item_Rec_LPP]'
+							cost = lpp;
+							return [lpp,src];
+						}
+					}
+				};
+				
+				if (cost == '' || cost == null){
+					return [0,'COULD NOT FIND COST'];
+				};
+			} catch(e){
+				nlapiLogExecution('error','Error finding average cost',JSON.stringify(e));
+				return [0];
+			}
+		}
+		
+	} catch (err){
+
+		nlapiLogExecution('Error','Error at some point of the avg cost function',JSON.stringify(err));
+		if (err instanceof nlobjError){
+			if (err.getCode() == 111){
+				throw usageError;
+			}
+		}
+		return null;
+	}
+
+}
+
+// Create Inv Adj for date-1 for same inv quantity
+
+var newInvAdjRec = {
+		entityName: "inventoryadjustment",
+		sublist: 'inventory',
+		//recordId : "",
+		// create custom record
+		insertRecord : function(tranId,date,sub,auditRec,fixBins){
+			
+			try{
+				if (fixBins==true) {
+					name = tranId.split('_')[0];
+					var newName = name +'_inv_adj_script';
+				} else {
+					var idDate = getDate(date,1);
+					var name = getPrefix(idDate);
+					if (name == null){
+						name = tranId.split('_')[0].substr(0,9);
+					}
+					var newName = name +'_inv_adj_script';
+				};
+				
+				var invAdj = nlapiCreateRecord(this.entityName);
+				
+				invAdj.setFieldValue('trandate',date); // tran date
+				invAdj.setFieldValue('tranid', newName);
+				invAdj.setFieldValue('subsidiary',sub);
+				invAdj.setFieldValue('account',newInvAdjAcctId);
+				invAdj.setFieldValue('custbody_mb_linked_audit_rec',auditRec);
+
+				//var recordId = nlapiSubmitRecord(invAdj);
+
+			} catch(e){
+            	nlapiLogExecution("error", "Insert Inv Adj Record Error", errText(e));
+			}
+		//	nlapiLogExecution('debug','invadj id',recordId)
+			
+			return (invAdj);
+		},
+		
+		addInvLines : function(rcd,item,qty,channel,location,cost,bins,reason,invAdjId,memo,packsize,parent,createPDs){
+			if (createPDs!='F' && createPDs!=false){
+				try {
+					rcd.selectNewLineItem(this.sublist);
+					rcd.setCurrentLineItemValue(this.sublist,'item',item);
+					rcd.setCurrentLineItemValue(this.sublist,'adjustqtyby',qty);
+					rcd.setCurrentLineItemValue(this.sublist,'class',channel);
+					rcd.setCurrentLineItemValue(this.sublist,'unitcost',roundVal(cost));
+					rcd.setCurrentLineItemValue(this.sublist,'location',location);
+					rcd.setCurrentLineItemValue(this.sublist,'custcol_mb_item_pack_size',packsize);
+					rcd.setCurrentLineItemValue(this.sublist,'custcol_mb_item_parent',parent);
+					rcd.setCurrentLineItemValue(this.sublist,'memo',memo)
+					
+					var subrecord = rcd.createCurrentLineItemSubrecord('inventory', 'inventorydetail');
+					var flag = false;
+					
+					for (x=0;x<bins.length;x++){
+						
+						subrecord.selectNewLineItem('inventoryassignment');
+						subrecord.setCurrentLineItemValue('inventoryassignment', 'binnumber', bins[x].bin);
+						subrecord.setCurrentLineItemValue('inventoryassignment', 'quantity', bins[x].binQty);
+						subrecord.commitLineItem('inventoryassignment');
+						var flag = true
+					}
+					
+					//rcd.setCurrentLineItemValue(this.sublist,)
+					if (flag==true) subrecord.commit();
+					rcd.commitLineItem(this.sublist)
+				} catch (err){
+					nlapiLogExecution('error','Error in creating new inv adj rec line',errText(err));
+				}
+			}
+				
+		
+		}
+}
+
+function createChildObj(resObj){
+	if (resObj!=null){
+		var child = {
+				item : resObj.item,
+				//adjQty : resObj.adjQty,
+				//adjQtyType : resObj.adjQtyType,
+				memo : resObj.memo,
+				//totalCost : resObj.totalCost,
+				location : resObj.location,
+				//qtyOnHand : resObj.qoh,
+				//newQty : resObj.newQty,
+				lineId : resObj.lineId,
+				parent : false,
+			}
+			
+			return child;
+	}
+}
+
+function createParentObj(resObj){
+	if (resObj!=null) {
+		var parent = {
+			item : resObj.item,
+			//adjQty : resObj.adjQty,
+			//adjQtyType : resObj.adjQtyType,
+			memo : resObj.memo,
+			//totalCost : resObj.totalCost,
+			location : resObj.location,
+			//qtyOnHand : resObj.qoh,
+			//newQty : resObj.newQty,
+			lineId : resObj.lineId,
+			channel : resObj.channel,
+			parent : true,
+			isAvgCost : false
+		}
+		
+		return parent;
+	}
+}
+
+
+function createMultiParentObj(parItem,numResults,invAdjRec){
+	var obj = {
+			parentItem : parItem,
+			numResults : numResults,
+			invAdj : invAdjRec
+	}
+	return obj;
+}
+
+function getAuditRec(tranDate){
+	var filterToAdd = new Array()
+	filterToAdd.push(new nlobjSearchFilter('custrecord_mb_runtime_date',null,'on',tranDate));
+	
+	var search = generateSavedSearchResults(auditRecSearchId,auditRecSearchName, filterToAdd,'T',null,null)[0];
+	if (search!=null || search!=''){
+		var auditRec = ''
+		try {
+			if (search[0]) {
+				var auditRec = search[0].getValue('internalid');//nlapiLoadRecord(custAuditRec.entityName,search[0].getId())
+			}
+		} catch(err){
+			nlapiLogExecution('error','error getting audit rec',JSON.stringify(err));
+		};
+
+		if (auditRec!='') {
+			return auditRec;//.getId();
+		}
+	} else {
+		return '';
+	}
+}
+
+function getBins(invAdjRec, line){
+	var bins = []
+	
+	try {
+		var subrecord = invAdjRec.viewLineItemSubrecord('inventory', 'inventorydetail', line);
+		var binCt = null;
+		if (subrecord){
+			var binCt = subrecord.getLineItemCount('inventoryassignment');
+		} 
+
+		if (binCt){
+			
+			for (z=1;z<=binCt;z++){
+				subrecord.selectLineItem('inventoryassignment',z)
+				var bin = subrecord.getCurrentLineItemValue('inventoryassignment','binnumber');
+				var binQty = subrecord.getCurrentLineItemValue('inventoryassignment','quantity');
+				
+				bins.push({'bin':bin,'binQty':oppVal(binQty),'name':subrecord.getCurrentLineItemText('inventoryassignment','binnumber')})
+			}
+		}
+	} catch(err){
+		nlapiLogExecution('error','Error in fetching bins',errText(err));
+	}
+	
+	return bins;
+};
+
+function getSublistIds(rec,sublist){
+	if (typeof rec == 'object'){
+		var retArr = new Array();
+		retArr.push('0');
+		var ct = rec.getLineItemCount(sublist);
+		for (z=1;z<=ct;z++){
+			var line = rec.getLineItemValue(sublist,'line',z);
+			retArr.push(line);
+		}
+		return retArr;
+	} else {
+		return null;
+	}
+}
+
+function getTrueLine(array,line){
+	
+	var a = line.toString()
+	var result = array.indexOf(a);
+	
+	return result;
+	
+}
+
+function fixDaysNegBins(tranDate){
+	// find the items with these negative bins for this date and build negative inventory;
+	try{
+		var date = new Date();
+		date  = getDate(date,2);
+		
+		var searchLoc = ['11','12','13','22'];
+
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('trandate',null,'on',tranDate));
+		//filters.push(new nlobjSearchFilter('formulanumeric',null,'equalto',1).setFormula('case when {item}={custcol_mb_item_parent} then 1 else 0 end'));
+		//filters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+		
+		var columns = new Array();
+		columns.push(new nlobjSearchColumn('item',null,'group').setSort(true));
+//		columns.push(new nlobjSearchColumn('internalid','binNumber','group'));
+		
+		//var search = nlapiSearchRecord('transaction',null,filters,columns);
+		var search = generateSavedSearchResults('customsearch714','trx search',filters,'T',null,null,null)[0];
+		
+		if (search){
+//			nlapiLogExecution('debug','search length ',search.length);
+			var items = search.map(function(res,index){
+				return res.getValue('item',null,'group');
+			});
+//			var bins = search.map(function(res,index){
+//				return res.getValue('internalid','binNumber','group');
+//			})
+			
+			var filters2 = new Array();
+			filters2.push(new nlobjSearchFilter('item',null,'anyof',items));
+			filters2.push(new nlobjSearchFilter('location',null,'anyof',searchLoc));
+			//filters2.push(new nlobjSearchFilter('internalid','binNumber','anyof',bins));
+			filters2.push(new nlobjSearchFilter('trandate',null,'onorafter','12/31/2017'));
+			filters2.push(new nlobjSearchFilter('binnumberquantity',null,'lessthanorequalto',0).setSummaryType('sum'));
+			
+			var columns2 = new Array();
+			columns2.push(new nlobjSearchColumn('internalid','binnumber','group'));
+			//columns2.push(new nlobjSearchColumn('location',null,'group'));
+			
+			columns2.push(new nlobjSearchColumn('formulanumeric',null,'avg').setFormula('round({item.locationaveragecost},5)'));
+			
+			var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_7','Inventory Valuation Search',filters2,'T',columns2,'T',null)
+			var itemSearch = arrSearch[0];
+			var columns = arrSearch[1];
+			
+			if (itemSearch){
+				if (itemSearch.length>0){
+					var newPrefix = getPrefix(tranDate).toString();
+					var name = newPrefix+'TOBEDELETED_';
+					var invAdj = newInvAdjRec.insertRecord(name,date,'18',null,true);
+					
+					for (w=0;w<itemSearch.length;w++){
+						var res = itemSearch[w];
+						var item = res.getValue('item',null,'group');
+						var qty = absVal(res.getValue('binnumberquantity',null,'sum'));
+						var bin = res.getValue('internalid','binnumber','group');
+						var binName = res.getValue('binnumber',null,'group');
+						if (binName ==null || binName =='- None -') continue;
+						var bins = [{'bin':bin,'binQty':qty}];
+						var location = res.getValue('location',null,'group');
+						var cost = absVal(res.getValue('formulanumeric',null,'avg')); 
+						
+						newInvAdjRec.addInvLines(invAdj,item,qty,null,location,cost,bins,'[CURR AVG COST]',null,'DUMMY ADJ TO PROCESS DAYS RECORDS','1',null,true);
+						
+					};
+					
+					var submit = nlapiSubmitRecord(invAdj);
+					nlapiLogExecution('debug','submit',submit);
+					return submit; 
+				}
+			};
+		}
+		
+	} catch(err){
+		nlapiLogExecution('error','Error filling negative bins',JSON.stringify(err));
+		return null;
+	};
+
+};
+
+// helper functions 
+
+// get saved search results 
+function generateSavedSearchResults(savedSearchId , savedSearchName , addFilters , enableAddFilters , addColumns, enableAddColumns,recType) {
+	var generatedResults = new Array();
+	var searchColumns    = new Array();
+	if( ((addFilters != '' && addFilters != null) || enableAddFilters != 'T' ) || ((addColumns != '' && addColumns != null) || enableAddColumns != 'T' )){
+		try{
+			
+			var remainingUsage = nlapiGetContext().getRemainingUsage()
+			//nlapiLogExecution('audit','remaining usage',remainingUsage)
+			if (remainingUsage<= MINIMUM_USAGE) {
+				var flag = true
+			    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+				var scriptId = nlapiGetContext().getScriptId();
+				var status = nlapiScheduleScript(scriptId);
+				nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+				throw usageError;
+			}
+			if (flag == true ){
+				return [null,null];
+			}
+			//Executing a Saved search with received savedSearchId
+			var recordSearch = nlapiLoadSearch('', savedSearchId);
+			
+			if( addFilters != '' && addFilters != null && enableAddFilters == 'T' ){
+				recordSearch.addFilters( addFilters );
+			};
+			
+			if (addColumns !='' && addColumns!=null && enableAddColumns =='T'){
+				recordSearch.addColumns(addColumns);
+			};
+
+			var resultSet=recordSearch.runSearch();
+			var resultslice = '';
+			var id=0;
+//			nlapiLogExecution("debug", "sr length", resultSet.length);
+			
+			for(var t=0 ; resultslice.length >= 1000 || t ==0 ; t++){
+
+				resultslice = resultSet.getResults(id, id+1000 );
+				if (resultslice != null && resultslice != ''){
+					generatedResults = generatedResults.concat(resultslice);
+					id += resultslice.length;
+				}
+//				nlapiLogExecution("debug", "output length", generatedResults.length);
+			}
+			searchColumns = recordSearch.getColumns();
+			return [generatedResults , searchColumns ];
+		}catch(ERR_SavedSearch){
+
+			nlapiLogExecution('ERROR','Error Occured in Processing SavedSearch('+savedSearchName+':'+savedSearchId+') Results Block ',errText(ERR_SavedSearch));
+			if (ERR_SavedSearch instanceof nlobjError){
+				if (ERR_SavedSearch.getCode() == 111){
+					throw usageError;
+				}
+			}
+			return [generatedResults , searchColumns ];
+		}
+	}
+	return [generatedResults , searchColumns ];
+}
+
+function sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody) {
+    
+	try{
+		if(emailBody && fromEmail && toEmail){
+			nlapiSendEmail(fromEmail, toEmail, emailSubject, emailBody);
+		}
+	}catch(e){
+		nlapiLogExecution('error', 'There was a error while sending a mail', e);
+	}
+}
+
+function parseFloatOrZero(val) {
+    	return isNaN(parseFloat(val)) ? 0 : parseFloat(val);
+}
+
+function errText(_e) {
+    _internalId = nlapiGetRecordId();
+    if (!(typeof _internalId === "number" && (_internalId % 1) === 0)) {
+	_internalId = 0;
+    }
+    var txt = "";
+    if (_e instanceof nlobjError) {
+    	// this is netsuite specific error
+    	txt = "SuiteScript Error: Record ID :: " + _internalId + " :: " + _e.getCode() + " :: " + _e.getDetails() + " :: " + _e.getStackTrace().join(", ");
+    }
+    else {
+    	// this is generic javascript error
+    	txt = "JavaScript/Other Error: Record ID :: " + _internalId + " :: " + _e.toString() + " : " + _e.stack;
+    }
+    return txt;
+}
+
+function roundVal(val) {
+    var dec = 2;
+    var result = Math.round(val * Math.pow(10, dec)) / Math.pow(10, dec);
+    return result;
+}
+
+function emptyIfNull(val) {
+    return val == null ? "" : val;
+}
+
+function absVal(int){
+	var num = parseFloat(int)
+	if (num < 0) {
+		return (num*-1)
+	} else {
+		return num;
+	}
+}
+
+function oppVal(int){
+	var num = parseFloat(int)
+	return (num*-1)
+}
+
+function getDate(date,addDays){
+	if (addDays ==null || addDays == ''){
+		addDays = 0;
+	}
+	var dateToSet = new Date(date);
+
+	var newDate = nlapiAddDays(dateToSet,addDays);
+	var result = nlapiDateToString(newDate,'date')
+	
+	return result;
+}
+
+function qtyReducer(total,res){
+	var sum = total+parseFloat(res.getValue('quantity'));
+	return sum;
+}
+
+function getPrefix(date){
+	try {
+		var arr = date.split('/');
+		var monthNum = arr[0];
+		var dayNum = arr[1].toString();
+		if (dayNum.length==1) dayNum = '0'+dayNum;
+		var monthName = ''
+		switch(monthNum){
+			case '1':
+				monthName = 'Jan';
+				break;
+			case '2':
+				monthName = 'Feb';
+				break;
+			case '3':
+				monthName = 'Mar';
+				break;
+			case '4': 
+				monthName = 'Apr';
+				break;
+			case '5':
+				monthName = 'May';
+				break;
+			case '6' : 
+				monthName = 'Jun';
+				break;
+			case '7' : 
+				monthName = 'Jul';
+				break;
+			case '8':
+				monthName = 'Aug';
+				break;
+			case '9':
+				monthName = 'Sep';
+				break;
+			case '10':
+				monthName = 'Oct';
+				break;
+			case '11':
+				monthName = 'Nov';
+				break;
+			case '12':
+				monthName = 'Dec';
+		}
+		var str = arr[2].toString()+monthName+dayNum.toString();
+		return str;
+	} catch(err){
+		nlapiLogExecution('error','Error getting prefix',JSON.stringify(err));
+		return null;
+	}
+	
+}
+
+function roundVal(val) {
+    var dec = 5;
+    var result = Math.round(val * Math.pow(10, dec)) / Math.pow(10, dec);
+    return result;
+}
+
+function setPreference(date){
+	try{
+		var config = nlapiLoadConfiguration('companypreferences');
+		config.setFieldValue('custscript_mb_first_date_fix',date);
+		config.setFieldValue('custscript_mb_second_date_fix',date);
+		var submit = nlapiSubmitConfiguration(config);
+		return 'Success';
+	} catch(err){
+		return 'Failure';
+		nlapiSendEmail('1423','Lucas@mibar.net','Error setting preferences','Manually start the 5025 script');
+	}
+	
+}	
+
+

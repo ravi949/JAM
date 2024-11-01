@@ -1,0 +1,62 @@
+function beforeSubmit(type)
+{
+     //nlapiLogExecution('Debug', ' beforeSubmit is  ', type);
+    var recVendor = nlapiGetNewRecord();
+    var subsidiaryCount = recVendor.getLineItemCount('submachine'); 
+    for (var i = 1; i <= subsidiaryCount; i++) {
+        var vendorSub= recVendor.getLineItemValue('submachine', 'subsidiary',i);
+        //nlapiLogExecution("DEBUG", "subsidiary in vendor at " + i + " is ", vendorSub);
+    }
+}
+
+function AfterSubmit(type) {
+    var retVal = "";
+    if (type == "create" || type == "edit") 
+    {
+        var recVendor = nlapiGetNewRecord();
+        var vendorID = nlapiGetRecordId(); //get the internalid
+
+        //nlapiLogExecution('Debug', 'vendorID in beforeSubmit is  ', vendorID);
+
+        var primary_subsidiary_original = recVendor.getFieldValue('subsidiary'); // nlapiLookupField('vendor', vendorID, 'subsidiary'); //original Primary Subsidiary
+
+        var subsidiary_list = recVendor.getFieldValue('comments'); //create another bodyfield to store subsidiary values.. for now it is comments field.
+
+        if (subsidiary_list && subsidiary_list.indexOf("#") >= 1) //only if the comments had # then it indicates it is to do with subsidiary list.
+        {
+            var arrSubsidiaryList = subsidiary_list.split("#");
+            primary_subsidiary_original = arrSubsidiaryList[0]; //first value in array is always primary.. If this is not required, comment this line
+            for (var i = 0; i <= arrSubsidiaryList.length; i++) {
+                if ((arrSubsidiaryList[i] != "") && (arrSubsidiaryList[i] != "#") && (arrSubsidiaryList[i] != null)) {
+                    nlapiSubmitField('vendor', vendorID, 'subsidiary', arrSubsidiaryList[i]); //adding Subsidiary 1 to sublist
+                   //nlapiLogExecution('debug', 'inside and updating subsidiry list  ', arrSubsidiaryList[i]+ ' -- ' + i);
+
+                }
+            }
+        }
+        nlapiSubmitField('vendor', vendorID, 'subsidiary', primary_subsidiary_original); //set Primary Subsidiary back to original
+        //nlapiLogExecution('debug', 'primary_subsidiary_original and comments :  ', primary_subsidiary_original + ' -- ' + subsidiary_list);
+
+        //var primary_subsidiary_original = nlapiLookupField('vendor', '12345', 'subsidiary'); //original Primary Subsidiary
+        /*
+        nlapiLogExecution('error', 'primary_subsidiary_original in beforeSubmit is  ', primary_subsidiary_original);
+        nlapiSubmitField('vendor', vendorID, 'subsidiary', '1'); //adding Subsidiary 1 to sublist
+        nlapiSubmitField('vendor', vendorID, 'subsidiary', '2'); //adding Subsidiary 2 to sublist
+        nlapiSubmitField('vendor', vendorID, 'subsidiary', '3'); //adding Subsidiary 3 to sublist
+        nlapiSubmitField('vendor', vendorID, 'subsidiary', primary_subsidiary_original); //set Primary Subsidiary back to original
+        */
+
+//        recVendor.setFieldValue('subsidiary', '1'); //adding Subsidiary 1 to sublist
+//        recVendor.setFieldValue('subsidiary', '2'); //adding Subsidiary 2 to sublist
+//        recVendor.setFieldValue('subsidiary', '3'); //adding Subsidiary 3 to sublist
+//        recVendor.setFieldValue('subsidiary', primary_subsidiary_original); //set Primary Subsidiary back to original
+//        //var rTranId = nlapiSubmitRecord(recVendor);
+
+//        recVendor.setFieldValue('vendor', vendorID, 'subsidiary', '1'); //adding Subsidiary 1 to sublist
+//        recVendor.setFieldValue('vendor', vendorID, 'subsidiary', '2'); //adding Subsidiary 2 to sublist
+//        recVendor.setFieldValue('vendor', vendorID, 'subsidiary', '3'); //adding Subsidiary 3 to sublist
+//        recVendor.setFieldValue('vendor', vendorID, 'subsidiary', primary_subsidiary_original); //set Primary Subsidiary back to original
+
+    }
+}
+

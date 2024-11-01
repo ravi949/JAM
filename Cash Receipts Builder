@@ -1,0 +1,345 @@
+/**
+ * @NApiVersion 2.x
+ * @NScriptType Suitelet
+ * @NModuleScope SameAccount
+ */
+	define(['N/search',
+	        'N/record',
+	        'N/email',
+	        'N/runtime',
+	        'N/error',
+	        './lib/MBFormatFunctions.js',
+	        './lib/MBErrorHandler.js',
+	        './lib/MBHelpers.js'],
+
+    function(search, record, email, runtime, error, mbformat,mberror,mbHelp)
+    {
+
+    /**
+     * Definition of the Suitelet script trigger point.
+     *
+     * @param {Object} context
+     * @param {ServerRequest} context.request - Encapsulation of the incoming request
+     * @param {ServerResponse} context.response - Encapsulation of the Suitelet response
+     * @Since 2015.2
+     */
+    function onRequest(context) {
+    	//var depositId = runtime.getCurrentScript().getParameter({name: 'custscript_mb_deposit'});
+    	var depositId = context.request.parameters.custparam_mb_deposit;
+    	log.debug('Script parameter : ' + depositId);
+    	var resp  = buildCashRcd(depositId);
+    	if(resp[0]){
+    		suiteletResp = 'Cash has been applied';
+    	}
+    	else suiteletResp = 'Cash could not be applied.' + '\n' + resp[1];
+    	
+    	context.response.writeLine(suiteletResp);
+
+    }
+
+    return {
+        onRequest: onRequest
+    };
+
+    function buildCashRcd(depositId){
+      	try{
+      		var lineCount = 0;var storeDepositId;
+      		log.debug('deposit id',depositId);
+
+      		// load old record
+
+      		var depositRcd = record.load({
+                    type: record.Type.DEPOSIT,
+                    id: depositId
+            });
+  			if(depositRcd){
+                // qualify deposit ,throw error if it cant be done
+                // total amount to apply not correct, check against the deposit rcd.
+  				storeDepositId = depositRcd.getValue(mbHelp.gfv('custbody_mb_store_deposit_link'));
+                var customerInfo = getCustomerInfo(depositRcd);
+                if (customerInfo.entity == null) prettyError('bad customer error');
+                
+                var batchId = getBatchId(depositRcd);
+                if(batchId){
+    	   
+                    // create a new one
+                    var custPayment = record.transform({
+                         fromType: record.Type.CUSTOMER,
+                         fromId: customerInfo.entity,
+                         toType: record.Type.CUSTOMER_PAYMENT,
+                         isDynamic: true
+                     });
+                    custPayment.setValue(mbHelp.sfv('trandate', depositRcd.getValue(mbHelp.gfv('trandate')), false));
+            		log.debug("trandate",custPayment.getValue((mbHelp.gfv('trandate'))));
+                    custPayment.setValue(mbHelp.sfv('aracct', customerInfo.account, true));
+                    ///custPayment.setValue(mbHelp.sfv('undepfunds',true,true));
+                    
+                    // add bank deposit as credit
+                    var subList = 'credit';
+    
+                    var lineNumber = custPayment.findSublistLineWithValue({
+                        sublistId: subList,
+                        fieldId: 'doc',
+                        value: depositId
+                    });
+                    if(lineNumber>=0){
+                        custPayment.selectLine({sublistId: subList,line: lineNumber});
+                        custPayment.setCurrentSublistValue(mbHelp.scsfv(subList,'apply',true));
+                    }
+                    else{
+                    	prettyError('No credit record found error');
+                    }
+                    var checkAmount = custPayment.getValue(mbHelp.gfv('unapplied'));
+                    log.debug("checkAmount",checkAmount);
+                	// put amount on account where there nothing to apply.
+                	//if(!applyInvoices(storeDepositId, custPayment, batchId,depositId)) prettyError('No invoices to apply');
+                	applyInvoices(storeDepositId, custPayment, batchId,depositId);
+
+                	var payAmount = mbformat.parseFloatOrZero(custPayment.getValue(mbHelp.gfv('payment')));
+            		log.debug("Payment ",payAmount);
+            		
+            		// technically this should never happen.
+            		if(payAmount > 0 ){
+            			prettyError('Insufficient funds to pay off these invoices.');
+            		}
+                               	
+                	var custPaymentId = custPayment.save();
+                	 
+                	if(storeDepositId) updateStoreDeposit(storeDepositId, 'Integrated','');
+                	
+                	return [true,''];
+                }
+           }
+    	}
+    	catch(ex){
+        	if(storeDepositId) updateStoreDeposit(storeDepositId,null,ex.message);
+    		mberror.log(ex);
+    		return [false,ex.message];
+    	}
+    }
+    // return Account Info from first other line.
+    function getCustomerInfo(depositRcd){
+        var subList = 'other';
+        return(
+        		{
+        			entity : depositRcd.getSublistValue(mbHelp.gsfv(subList,'entity',0)),
+        			account : depositRcd.getSublistValue(mbHelp.gsfv(subList,'account',0))
+        		}
+        )
+    }
+    
+    // get batch id from store deposit rcd.
+    function getBatchId(depositRcd){
+        var storeDepositId = depositRcd.getValue(mbHelp.gfv('custbody_mb_store_deposit_link'));
+        var batchId = null;
+        if(storeDepositId){
+            var fieldLookUp = search.lookupFields({
+                type: 'customrecord_mb_store_deposit',
+                id: storeDepositId,
+                columns: ['custrecord_mb_store_batch','custrecord_mb_store_status']
+            });
+            if(fieldLookUp.hasOwnProperty('custrecord_mb_store_batch')) batchId = fieldLookUp.custrecord_mb_store_batch;
+            if(fieldLookUp.hasOwnProperty('custrecord_mb_store_status')){
+            	var status = fieldLookUp.custrecord_mb_store_status;
+            	log.debug("deposit status",status);
+            }
+            if(status != "Deposit Created") {
+            	batchId = null;
+            	prettyError('This deposit has been integrated already');
+            }
+        }
+        return (batchId);
+    }
+    function prettyError(errorMessage){
+    	var errorObj = error.create({
+    	    name: 'Invoice Validation',
+    	    message: errorMessage,
+    	    notifyOff: false
+    	});
+    	throw errorObj;
+    }
+    // get invoices for this batch and find they in apply list to key off.
+    function applyInvoices(storeDepositId,custPayment,batchId,depositId){
+    	try{
+    			var resultId=null;
+    			log.debug("batchId",batchId);
+            	var invoiceSearch = getInvoices(batchId);
+               	invoiceSearch.run().each(function(result) {
+               		resultId = result.id;
+                    var invoiceId = result.getValue({name: 'custrecord_mb_store_detail_invoice'});
+                    log.debug("invoice",invoiceId);
+                    // search apply list for invoice
+                    var subList =  'apply';
+                    var lineNumber = custPayment.findSublistLineWithValue({
+                        sublistId: subList,
+                        fieldId: 'doc',
+                        value: invoiceId
+                    });
+                    log.debug("lineNumber",lineNumber);
+                    if(lineNumber>=0){
+                        custPayment.selectLine({sublistId: subList,line: lineNumber});
+                        
+                		var amountDue = mbformat.parseFloatOrZero(custPayment.getCurrentSublistValue(mbHelp.gcsfv(subList,'due')));
+                		var discountAmount = mbformat.parseFloatOrZero(custPayment.getCurrentSublistValue(mbHelp.gcsfv(subList,'discamt')));
+                		var toPay = parseFloat((amountDue -  discountAmount).toFixed(2));
+                		log.debug("amountDue/discAmount",amountDue.toString()+' - ' + discountAmount.toString()+" = "+toPay.toString());
+                		
+                        var amountPaid = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_payment'}));
+                        var debugout = "amountPaid  :  "+ amountPaid + '\n';
+                        var miscTaken  = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_misc'}));
+                        debugout += "miscTaken  :  "+ miscTaken + '\n';
+                        var feeTaken  = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_invoice_fees'}));
+                        debugout += "feeTaken   :  "+ feeTaken  + '\n';
+                        var roundTaken = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_rounding'}));
+                        debugout += "roundTaken  :  "+ roundTaken + '\n';
+                        var shortPayTaken = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_shortpay'}));
+                        debugout += "shortPayTaken   :  "+ shortPayTaken  + '\n';
+                        var nonInvFeeTaken = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_non_invfees'}));
+                        debugout += "nonInvFeeTaken  :  "+ nonInvFeeTaken  + '\n';
+                        var totalPaid = mbformat.parseFloatOrZero((amountPaid +(miscTaken+feeTaken+roundTaken+shortPayTaken+nonInvFeeTaken)).toFixed(2));
+                        log.debug("detail fields",debugout);
+                        var discountTaken  = mbformat.parseFloatOrZero(result.getValue({name: 'custrecord_mb_store_dtl_discount'}));
+                        
+
+                		log.debug("totalPaid/discTaken",totalPaid.toString()+' + ' + discountTaken.toString());
+
+                		var messg = 'Net Invoice (~1) is not zero.'
+                        		.replace('~1',result.getText({name: 'custrecord_mb_store_detail_invoice'}));
+                		
+                		
+                		if(mbformat.parseFloatOrZero((totalPaid+discountTaken).toFixed(2)) != mbformat.parseFloatOrZero(amountDue)){
+                			prettyError(messg);
+                        }
+
+                        //custPayment.setCurrentSublistValue(mbHelp.scsfv(subList,'amount',totalPaid));
+                        custPayment.setCurrentSublistValue(mbHelp.scsfv(subList,'discamt',discountTaken));
+                        custPayment.setCurrentSublistValue(mbHelp.scsfv(subList,'apply',true));
+
+                		var netDue =  totalPaid - discountTaken;
+                		log.debug("netdue",netDue);
+                		
+                        var checkAmount = mbformat.parseFloatOrZero(custPayment.getValue(mbHelp.gfv('unapplied')));
+                		log.debug("checkamount ",checkAmount);
+                		        
+                        updateResp(result.id,"Success");
+                        updateFees(batchId,invoiceId,storeDepositId,depositId)
+                    }
+           		    return true;
+               	});
+                if(!resultId) return false;
+                return true;
+    	}
+    	catch(err){
+    		var ex = JSON.parse(err);
+    		updateResp(resultId,ex.message);
+    		throw err;
+    	}
+    	return false;
+    }
+    function getInvoices(batchId)
+    {
+    	oSearch = new Object();
+    	oSearch.type = 'customrecord_mb_store_detail';
+    	oSearch.filters = [
+    	        	      ['custrecord_mb_store_dtl_batch', 'is', batchId]
+    	];
+    	
+    	oSearch.columns = [
+                   	      search.createColumn({name: 'custrecord_mb_store_detail_invoice'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_payment'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_discount'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_misc'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_invoice_fees'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_rounding'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_shortpay'}),
+                 	      search.createColumn({name: 'custrecord_mb_store_dtl_non_invfees'})
+        ];
+        return search.create(oSearch);
+    }
+    // update 2 fees tables with deposit id after its been applied.
+    function updateFees(batchId,invoiceId,storeDepositId,depositId){
+       	var feeSearch = getFees(batchId,invoiceId);
+       	feeSearch.run().each(function(result) {
+       		
+            var internalId = result.id;
+            if(internalId){
+            	var id = record.submitFields({
+            	    type: 'customrecord_mb_store_fees',
+            	    id: internalId,
+            	    values: {
+            	    	custrecord_mb_store_fees_deposit_id: storeDepositId
+            	    },
+            	    options: {enableSourcing: false,ignoreMandatoryFields : true}
+            	});
+            }
+        	var invoiceFeeId = result.getValue({name: 'custrecord_mb_fees_link'});
+        	if(invoiceFeeId){
+            	var id = record.submitFields({
+            	    type: 'customrecord_mb_invoice_fees',
+            	    id: invoiceFeeId,
+            	    values: {
+            	    	custrecord_mb_fees_deposit_id: depositId
+            	    },
+            	    options: {enableSourcing: false,ignoreMandatoryFields : true}
+            	});
+        	};
+            
+   		    return true;
+       	});
+    }
+    function getFees(batchId,invoiceId)
+    {
+    	oSearch = new Object();
+    	oSearch.type = "customrecord_mb_store_fees";
+    	oSearch.filters = [
+    	         	      ["custrecord_mb_fees_invoice","is",invoiceId],'and',
+    	        	      ['custrecord_mb_store_fees_batch', 'is', batchId]
+    	         	      ];
+    	oSearch.columns = [
+                   	      search.createColumn({name: 'custrecord_mb_fees_link'}),
+    	                   ];
+        return search.create(oSearch);
+    }
+    
+    // update status back to store dtl record so we can track error and success.
+    function updateResp(internalId,resp){
+    	if(internalId){
+        	var id = record.submitFields({
+        	    type: 'customrecord_mb_store_detail',
+        	    id: internalId,
+        	    values: {
+        	        custrecord_mb_store_dtl_resp: resp
+        	    },
+        	    options: {
+        	        enableSourcing: false,
+        	        ignoreMandatoryFields : true
+        	    }
+        	});
+    	}
+    }
+    // update status back to store deposit record so we can track error and success.
+    function updateStoreDeposit(internalId,status,resp){
+    	var thisDate =mbformat.getNSCurrentDate();
+    	if(internalId){
+    		var vals = {
+        	        custrecord_mb_store_status :  status,
+        	        custrecord_mb_store_process_date : thisDate ,
+        	        custrecord_mb_store_response : resp
+        	    };
+    		if(!status)
+    			vals = {custrecord_mb_store_response : resp,
+    						custrecord_mb_store_process_date : thisDate ,
+    						};
+        	var id = record.submitFields({
+        	    type: 'customrecord_mb_store_deposit',
+        	    id: internalId,
+        	    values: vals,
+        	    options: {
+        	        enableSourcing: false,
+        	        ignoreMandatoryFields : true
+        	    }
+        	});
+    	}
+    }
+    
+});

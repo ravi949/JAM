@@ -1,0 +1,17 @@
+function beforeSubmit(type){
+	if (type=='delete'){
+		
+		var rec = nlapiGetOldRecord();
+		
+		var createdFrom = rec.getFieldValue('custbody_mb_item_receipt_link');
+		var createdFromText = rec.getFieldText('custbody_mb_item_receipt_link');
+		
+		if (createdFrom!=''&& createdFrom!= null){
+			
+			throw nlapiCreateError('Cannot Delete',
+				'Journal Entry Cannot Be Deleted, please delete '+createdFromText+' which is linked in the custom tab to delete this record',
+				true);
+		}
+
+	}
+}

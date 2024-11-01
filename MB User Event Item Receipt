@@ -1,0 +1,166 @@
+function beforeSubmit(type) {
+	try{
+		
+		if (type == 'delete') {
+			
+			var rec = nlapiLoadRecord('itemreceipt',nlapiGetRecordId());
+			var id = rec.getId();
+			var jeId = rec.getFieldValue('custbodymb_journal_entry_id'); // verify field here
+			
+			nlapiLogExecution('debug','jeId in delete context',jeId)
+			
+			if (jeId!='' && jeId!=null){
+				
+				nlapiDeleteRecord('journalentry',jeId);
+				nlapiLogExecution('debug','deleted journal entry','deleted entry internal id: '+jeId);
+				
+			} else {
+				
+				nlapiLogExecution('debug','no journal entry id')
+				
+			}
+		} 
+	} catch(ex){
+		nlapiLogExecution('error','GL Journal Entry Delete Error',errText(ex))
+	}
+};
+
+function afterSubmit(type){
+	
+	try {
+		var rec = nlapiLoadRecord(nlapiGetRecordType(),nlapiGetRecordId());
+		
+		if (rec.getFieldValue('custbodymb_journal_entry_id')=='' || rec.getFieldValue('custbody_mb_journal_entry_id')==null){
+		
+			if (rec.getFieldText('createdfrom').toLowerCase().indexOf('transfer order'>0)){
+				
+				if (type=='edit'){
+					
+					var rec = nlapiLoadRecord(nlapiGetRecordType(),nlapiGetRecordId());
+					var createJe = rec.getFieldValue('custbody_mb_create_journal_entry');
+					if (createJe=='T'){
+						rec.setFieldValue('custbody_mb_create_journal_entry','F');
+						var submit = nlapiSubmitRecord(rec);
+					}
+				}	
+				
+//				if (type == 'create' || type == 'edit'){
+				var id = rec.getId();
+				var scriptId = 'customscript_mb_scheduled_item_receipt';
+				
+				if (id!=null && id!=''){
+					var status = nlapiScheduleScript(scriptId,null,{'custscript_mb_receipt_id':id});
+				} else {
+					var status = nlapiScheduleScript(scriptId);
+				}
+				
+//				}
+				
+//				var filters = new Array();
+//				filters.push(new nlobjSearchFilter('internalid',null,'anyof',nlapiGetRecordId()));
+//				
+//				var columns = new Array();
+//				columns.push(new nlobjSearchColumn('debitamount',null,'SUM'));
+//				columns.push(new nlobjSearchColumn('internalid',null,'group'));
+//				
+//				var debitSrch = nlapiSearchRecord('transaction',null,filters,columns);
+//				
+//				if (debitSrch) {
+//					var srchAmt = debitSrch[0].getValue('debitamount',null,'sum');
+//				} else {
+//					nlapiLogExecution('debug','internalid failure', "record doesn't exist?");
+//				};
+//				
+	//
+//				var rec = nlapiLoadRecord(nlapiGetRecordType(),nlapiGetRecordId());
+//				
+//				var tranId = rec.getFieldValue('tranid');
+//				//var newName = 'JE-IC-'+tranId;
+//				var createdFrom = rec.getFieldValue('createdfrom');
+//				var tranDate = rec.getFieldValue('trandate');
+//				
+//				var createdFromText = nlapiGetFieldText('createdfrom');
+//				
+//				var key = createdFromText.split('#')[1];
+//				
+//				var filters = new Array()
+//					filters[0] = new nlobjSearchFilter('formulanumeric',null,'equalto',1).setFormula("case when '%"+key+"%' like {custbody_mb_ir_key} then 1 else 0 end"); // verify internal id field in prod here
+//					filters[1] = new nlobjSearchFilter('mainline',null,'is','T');
+//					filters[2] = new nlobjSearchFilter('trandate',null,'on',tranDate);
+//					filters[3] = new nlobjSearchFilter('creditamount',null,'equalto',srchAmt);
+//				
+//				var columns = new Array();
+//					columns[0] = new nlobjSearchColumn('internalid');
+//				
+//				var search = nlapiSearchRecord('journalentry',null,filters,columns)
+//				nlapiLogExecution('debug','search',JSON.stringify(search));	
+//				
+//				if (search) {
+//					
+//					if (search.length!=0) {
+//					
+//						var je = search[0]
+//						var jeId = je.getValue(columns[0]);
+//						
+//						var jeRec = nlapiLoadRecord('journalentry',jeId);
+//						
+//						var memo = 'Journal Entry for Item Receipt: '+tranId+', created from '+createdFromText;
+//						
+//						jeRec.setFieldValue('memo', memo);
+//						//jeRec.setFieldValue('tranid',newName);
+////						jeRec.setFieldValue('custbody_mb_ir_key',''); // verify internal id here 
+//						jeRec.setFieldValue('custbody_mb_item_receipt_link', rec.getId()); // verify internal id here 
+//						
+//						var lineCount = jeRec.getLineItemCount('line');
+//						
+//						nlapiLogExecution('debug','line count',lineCount)
+//						
+//						for (var line=1;line<=lineCount;line++){
+//							
+//							var lineItem = jeRec.selectLineItem('line',line);
+//							
+//							jeRec.setCurrentLineItemValue('line','memo', memo);
+//							
+//							jeRec.commitLineItem('line');
+//							
+//						}
+//						
+//						var id = nlapiSubmitRecord(jeRec);
+//						
+//						rec.setFieldValue('custbodymb_journal_entry_id',jeId); // verify internal id here 
+//						
+//						var id2 = nlapiSubmitRecord(rec);
+//					}	
+//				} else {
+//					nlapiLogExecution('error','no search')
+//				};
+			}
+		}
+		
+	} catch(e) {
+		nlapiLogExecution('error','after submit error',JSON.stringify(e))
+	};
+}
+
+function errText(_e) {
+	try {
+		
+		var err_title = 'Unexpected error';
+		var err_description = '';
+		
+		if (_e){
+			if ( _e instanceof nlobjError ){
+				err_description = err_description + ' ' + _e.getCode() + '|' + _e.getDetails();
+			} else {
+				err_description = err_description + ' ' + _e.toString();
+			};
+		};
+		
+		var fullError = err_title+': '+err_description;
+
+		return fullError;
+		
+	} catch(ex) {
+		nlapiLogExecution('ERROR', 'Error performing error logging');
+	};
+};

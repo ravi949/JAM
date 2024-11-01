@@ -1,0 +1,159 @@
+/**
+ * Module Description
+ *
+ * Version    Date            Author           Remarks
+ * 1.00       05 Dec 2017     rcm
+ *
+ */
+
+/**
+ * The recordType (internal id) corresponds to the "Applied To" record in your script deployment.
+ * @appliedtorecord recordType
+ *
+ * @param {String} type Operation types: create, edit, delete, xedit,
+ *                      approve, cancel, reject (SO, ER, Time Bill, PO & RMA only)
+ *                      pack, ship (IF only)
+ *                      dropship, specialorder, orderitems (PO only)
+ *                      paybills (vendor payments)
+ * @returns {Void}
+ */
+function mbUserEventAfterSubmit(type){
+	if(type=="edit")
+	{
+		try
+		{
+			nlapiLogExecution("debug","parent",nlapiGetFieldValue("parent"));
+			nlapiLogExecution("debug","Rolldown",nlapiGetFieldValue("custitem_mb_item_upd_child_bins"));
+
+			if(nlapiGetFieldValue("custitem_mb_item_upd_child_bins") == 'F' || nlapiGetFieldValue("custitem_mb_item_upd_child_bins")== null) return;
+			if(nlapiGetFieldValue("parent")!= null && nlapiGetFieldValue("parent")!= "") return;
+
+			var fieldsToRoll = nlapiGetContext().getSetting("SCRIPT","custscript_mb_fields_to_rolldown");
+
+			nlapiLogExecution("debug","rolldown field",fieldsToRoll);
+			var fieldList  = fieldsToRoll.split(",");
+
+			nlapiLogExecution("debug","before edit",type);
+
+			var binSubList = "binnumber";
+			var binList = new Array();
+			var lineCount = nlapiGetLineItemCount(binSubList);
+			for (var i = 1; i <= lineCount; ++i)
+			{
+                                var binItem = {
+                        		locationactive : 	nlapiGetLineItemValue(binSubList, "locationactive ", i),
+                        		onhand : 	nlapiGetLineItemValue(binSubList, "onhand ", i),
+                        		onhandavail	 : nlapiGetLineItemValue(binSubList, "onhandavail", i),
+                        		preferredbin	 :nlapiGetLineItemValue(binSubList, "preferredbin", i),
+                        		binnumber  : nlapiGetLineItemValue(binSubList, "binnumber", i),
+                        		location : nlapiGetLineItemValue(binSubList, "location", i)
+                                }
+                                binList.push(binItem);
+        			nlapiLogExecution("debug","bin pref ",nlapiGetLineItemText(binSubList, "preferredbin", i));
+//        			nlapiLogExecution("debug","bin location",nlapiGetLineItemValue(binSubList, "location", i));
+			}
+
+			var filters = [ new nlobjSearchFilter('parent',null, 'is', nlapiGetRecordId())];
+			var columns = []
+			var searchResult = nlapiSearchRecord('inventoryitem', null, filters, columns);
+			if(searchResult){
+			        for (var j = 0; j < searchResult.length; j++) {
+				        nlapiLogExecution("debug", "sub record id ", searchResult[j].getId());
+				        var rcdItem = nlapiLoadRecord("inventoryitem",searchResult[j].getId());
+				        if(rcdItem !=null){
+				        	// set header field here.
+				        	// remove old lines
+/*
+				        	var bincount = rcdItem.getLineItemCount(binSubList);
+		        			nlapiLogExecution("debug","bin count",bincount);
+				        	for(var i = bincount; i >= 1; i--) {
+				        		rcdItem.removeLineItem(binSubList, i);
+				        	}
+		        			nlapiLogExecution("debug","bin count after ",rcdItem.getLineItemCount(binSubList));
+*/
+			        		// update header fields
+				        	for (var k = 0 ;k< fieldList.length;k++){
+			        			nlapiLogExecution("debug",fieldList[k],nlapiGetFieldValue(fieldList[k]));
+				        		rcdItem.setFieldValue(fieldList[k],nlapiGetFieldValue(fieldList[k]));
+				        	}
+
+				        	// update bins
+						for (var int = 0; int < binList.length; int++) {
+				                        var binItem = binList[int];
+				                        nlapiLogExecution("debug","bin number",binItem.binnumber);
+
+				                        rcdItem.selectNewLineItem(binSubList);
+		        				rcdItem.setCurrentLineItemValue(binSubList, 'preferredbin',binItem.preferredbin);
+		        				rcdItem.setCurrentLineItemValue(binSubList, 'binnumber',binItem.binnumber);
+		        				rcdItem.commitLineItem(binSubList);
+
+			                        }
+						nlapiSubmitRecord(rcdItem,false);
+				        }
+			        }
+
+			}
+
+		}
+		catch (e) {
+			 nlapiLogExecution("error","error mbUEAS .",e);
+		}
+
+	}
+
+}
+/**
+ * The recordType (internal id) corresponds to the "Applied To" record in your script deployment.
+ * @appliedtorecord recordType
+ *
+ * @param {String} type Operation types: create, edit, delete, xedit
+ *                      approve, reject, cancel (SO, ER, Time Bill, PO & RMA only)
+ *                      pack, ship (IF)
+ *                      markcomplete (Call, Task)
+ *                      reassign (Case)
+ *                      editforecast (Opp, Estimate)
+ * @returns {Void}
+ */
+function mbUserEventBeforeSubmit(type){
+	var defaultBins = nlapiGetContext().getSetting("SCRIPT","custscript_mb_default_bins");
+	nlapiLogExecution("debug","defaultbins",defaultBins);
+
+    if (defaultBins == null)
+      	return;
+  
+    if (defaultBins.Trim() == "")
+      	return;
+  
+	var arDefaultBins  = defaultBins.split(",");
+
+	var binSubList = "binnumber";
+	var lineCount = nlapiGetLineItemCount(binSubList);
+	var addFirst = true; var add2nd = true ;
+
+	for (var i = 1; i <= lineCount; ++i)
+	{
+		if(arDefaultBins[0] == nlapiGetLineItemValue(binSubList, "binnumber", i)){
+			addFirst = false;
+		}
+		if(arDefaultBins[1] == nlapiGetLineItemValue(binSubList, "binnumber", i)){
+			add2nd = false;
+		}
+		nlapiLogExecution("debug","bin pref ",nlapiGetLineItemText(binSubList, "preferredbin", i));
+//		nlapiLogExecution("debug","bin location",nlapiGetLineItemValue(binSubList, "location", i));
+	}
+	if(addFirst){
+                nlapiSelectNewLineItem(binSubList);
+		nlapiSetCurrentLineItemValue(binSubList, 'preferredbin',"T");
+		nlapiSetCurrentLineItemValue(binSubList, 'binnumber',arDefaultBins[0]);
+		nlapiCommitLineItem(binSubList);
+	}
+	if(add2nd){
+		// add2nd
+                nlapiSelectNewLineItem(binSubList);
+		nlapiSetCurrentLineItemValue(binSubList, 'preferredbin',"T");
+		nlapiSetCurrentLineItemValue(binSubList, 'binnumber',arDefaultBins[1]);
+		nlapiCommitLineItem(binSubList);
+
+	}
+
+}

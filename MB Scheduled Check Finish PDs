@@ -1,0 +1,96 @@
+function scheduled(){
+	sendDailyUpdate('2538375','8/13/2018');
+}
+
+
+function sendDailyUpdate(internalId,date){
+	
+	try{ 
+		var emailSubject = 'Completed Processing for this date: '+date;
+		var pdObj = getPDInfo(internalId);
+		var pdInfo = 'PD Total Value : '+pdObj.amount+', PD 5025 built lines: '+pdObj.normalPDs+', PD EOD Lines: '+ pdObj.EODPDS+', PD Masked Lines: '+pdObj.MASKPDS+ ' \n ';
+		var pcObj = getPCInfo(date);
+		var pcInfo = 'PC Total Value: '+pcObj.amount+', PC Total # Records: '+pcObj.numRecs+', PC Expected Records for 5025 Fixer Script to hit: '+pcObj.badRecs+' \n ';
+		
+		var emailBody = ' \n '+pcInfo+' \n '+pdInfo;
+		nlapiSendEmail('1423',['Lucas@mibar.net'],emailSubject,emailBody);
+		
+		
+	} catch(err){
+		nlapiLogExecution('error','Error sending daily update',JSON.stringify(err));
+	}
+	
+}
+
+function getPDInfo(internalId){
+	try{
+		var objToReturn = {};
+		var rec = nlapiLoadRecord('inventoryadjustment',internalId);
+		var amount = rec.getFieldValue('estimatedtotalvalue');
+		objToReturn.amount = amount;
+		var memo = rec.getFieldValue('memo');
+		var arrMemo = memo.split('#');
+		objToReturn.normalPDs = arrMemo[1];
+		objToReturn.EODPDS = arrMemo[2];
+		objToReturn.MASKPDS = arrMemo[3];
+		var totalLines = rec.getLineItemCount('inventory');
+		objToReturn.lines = totalLines;
+		return objToReturn;
+		
+	} catch(err){
+		nlapiLogExecution('debug','err getting PD balance',JSON.stringify(err));
+		return null;
+	}
+}
+
+function getPCInfo(date){
+	try{
+		var date = getDate(date,0);
+		
+		var filterToAdd = new Array()
+		filterToAdd.push(new nlobjSearchFilter('account',null,'anyof','595'))
+		filterToAdd.push(new nlobjSearchFilter('trandate',null,'on',date));
+		filterToAdd.push(new nlobjSearchFilter('mainline',null,'is','T'));
+				
+		var columnToAdd = new Array();
+		columnToAdd.push(new nlobjSearchColumn('amount',null,'sum'));
+		columnToAdd.push(new nlobjSearchColumn('trandate',null,'group').setSort(true));
+		columnToAdd.push(new nlobjSearchColumn('formulanumeric',null,'sum').setFormula('1'));
+		columnToAdd.push(new nlobjSearchColumn('formulanumeric',null,'sum').setFormula('case when abs({amount})>1 then 1 else 0 end'));
+		
+		var search = nlapiSearchRecord('inventoryadjustment',null,filterToAdd,columnToAdd);
+		
+		nlapiLogExecution('debug','search',JSON.stringify(search));
+		if (search){
+			if (search[0]){
+				var objToReturn = {};
+				objToReturn.amount = search[0].getValue('amount',null,'sum');
+				objToReturn.numRecs = search[0].getValue(columnToAdd[2]);
+				objToReturn.badRecs = search[0].getValue(columnToAdd[3]);
+				return objToReturn;
+			}
+		}
+	} catch(err){
+//		return JSON.stringify(err);
+		nlapiLogExecution('debug','Error getting 5025 info',JSON.stringify(err));
+		return null;
+	}
+}
+
+function getDate(date,addDays){
+	try {
+		if (addDays ==null || addDays == ''){
+			addDays = 0;
+		}
+		var dateToSet = new Date(date);
+
+		var newDate = nlapiAddDays(dateToSet,addDays);
+		var result = nlapiDateToString(newDate,'date')
+		
+		return result;
+	} catch(err){
+		nlapiLogExecution('error','Error getting dates',JSON.stringify(err));
+		return '';
+	}
+
+}

@@ -1,0 +1,165 @@
+/*
+function processAfterSubmit()
+{
+    var newRec = nlapiGetNewRecord(); // this will get the new values for the custom record
+    var invoice_tranID = newRec.getFieldValue('custrecord_mb_invoice_tranid');
+    var invoiceInternal = getInternalId("CustInvc", invoice_tranID);
+
+    nlapiSubmitField('employee', emp, ['_emp_team_supervisor', '_emp_senior_supp'], [supervisor, seniorsupp]); // update the associated Employee record’s Supervisor and Senior Technical Support custom field using the new values from the custom record.
+
+
+}
+*/
+
+var MINIMUM_USAGE = 2000;
+
+function processFeesWithoutInvoice() {
+    //nlapiLogExecution("debug", "processFeesWithoutInvoice ", "About to start");
+    var context = nlapiGetContext();
+    var feesWithoutinvoice = getInvFeeWithoutInvoice();
+    //nlapiLogExecution("debug", "processFeesWithoutInvoice ", "feesWithoutinvoice fetch completed");
+    if (feesWithoutinvoice != null && feesWithoutinvoice.length > 0) {
+        //nlapiLogExecution("debug", "processFeesWithoutInvoice ", "feesWithoutinvoice fetch completed and " + feesWithoutinvoice.length);
+
+        for (var feeNoInvIndex = 0; feeNoInvIndex < feesWithoutinvoice.length; feeNoInvIndex++) {
+            {
+
+                if (nlapiGetContext().getRemainingUsage() <= MINIMUM_USAGE) {
+                    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left('
+                            + nlapiGetContext().getRemainingUsage()
+                            + ') . Exiting and rescheduling script.');
+                    setRecoveryPoint();
+                    checkGovernance();
+                }
+                try
+                {
+
+                    var invFeeRec_InternalId = feesWithoutinvoice[feeNoInvIndex].getValue("internalid");
+                    var invFeeRec_InvTranId = feesWithoutinvoice[feeNoInvIndex].getValue("custrecord_mb_invoice_tranid");
+                    var invFeeRec_InvInternalId = getInternalId("CustInvc", invFeeRec_InvTranId);
+                    //nlapiLogExecution("debug", "linkInvoiceToInvoiceFee ", invFeeRec_InternalId + "#" + invFeeRec_InvTranId + "#" + invFeeRec_InvInternalId + "#");
+
+                    if (invFeeRec_InvInternalId != null)
+                    {
+                        //nlapiLogExecution("debug", "invFeeRec_InvInternalId checking ", "Entered the function");
+                        linkInvoiceToInvoiceFee(invFeeRec_InternalId, "custrecord_mb_invoice_id", invFeeRec_InvInternalId)
+                    }
+                    else
+                      {
+                        //nlapiLogExecution("debug", "linkInvoiceToInvoiceFee is NULL ", invFeeRec_InternalId + "#" + invFeeRec_InvTranId + "#" + invFeeRec_InvInternalId + "#");
+						nlapiDeleteRecord('customrecord_mb_invoice_fees', invFeeRec_InternalId);                        
+                      }
+
+                }
+                catch (e) 
+                {
+                    nlapiLogExecution("error", "suiteScript() has encountered an error in processFeesWithoutInvoice ", e);
+                }
+            }
+        }
+    }
+}
+
+function linkInvoiceToInvoiceFee(recToLoad, fieldToUpdate, valueToUpdate)
+{
+    try
+    {
+
+    nlapiLogExecution("debug", "linkInvoiceToInvoiceFee ", recToLoad + "#" + fieldToUpdate + "#" + valueToUpdate + "#");
+    var record = nlapiLoadRecord('customrecord_mb_invoice_fees', recToLoad);
+    record.setFieldValue(fieldToUpdate, valueToUpdate); //record.setFieldText(fieldToUpdate, valueToUpdate);
+    record.setFieldValue('custrecord_mb_batch', ''); //record.setFieldText(fieldToUpdate, valueToUpdate);
+    nlapiSubmitRecord(record);
+    }
+    catch (e) {
+        nlapiLogExecution("error", "suiteScript() has encountered an error in linkInvoiceToInvoiceFee ", e);
+    }
+}
+
+function getInvFeeWithoutInvoice() {
+
+    try
+    {
+        var filters = [
+        new nlobjSearchFilter("custrecord_mb_invoice_id", null, "anyof", "@NONE@"),
+        new nlobjSearchFilter("custrecord_mb_invoice_tranid", null, "isnotempty", "")
+    ];
+    //nlapiLogExecution("debug", "getInvFeeWithoutInvoice ", "Entered the function");
+
+    var columns = [
+                   new nlobjSearchColumn("custrecord_mb_invoice_tranid", null, null),
+                   new nlobjSearchColumn("internalid", null, null)
+    ];
+
+    searchResults = nlapiSearchRecord("customrecord_mb_invoice_fees", null, filters, columns);
+    //nlapiLogExecution("DEBUG", "trying getInvFeeWithoutInvoice ", "after searchResults");
+
+    if (searchResults) {
+        return (searchResults)
+    }
+    return null;
+
+    }
+    catch (e) {
+        nlapiLogExecution("error", "suiteScript() has encountered an error in getInvFeeWithoutInvoice ", e);
+    }
+
+}
+
+
+function getInternalId(txnType, tranNr) {
+    try {
+
+    var filters = [new nlobjSearchFilter("type", null, "anyof", txnType), //"CustInvc"
+                   new nlobjSearchFilter("mainline", null, "is", 'T'), 
+                   new nlobjSearchFilter("numbertext", null, "is", tranNr) // "-HENJ-4773666332573"
+    ];
+
+    var columns = [
+                   new nlobjSearchColumn("internalid", null, null)
+    ];
+    //nlapiLogExecution("DEBUG", "trying getInternalId ", tranNr);
+
+    searchResults = nlapiSearchRecord("transaction", null, filters, columns);
+
+    if (searchResults) {
+        return (searchResults[0].getValue("internalid"));
+    }
+    return null;
+}
+    catch (e) {
+        nlapiLogExecution("error", "suiteScript() has encountered an error in getInternalId ", e);
+}
+
+}
+
+
+
+function setRecoveryPoint() {
+    var state = nlapiSetRecoveryPoint();
+    if (state.status == 'SUCCESS')
+        return;
+
+    if (state.status == 'RESUME') {
+        nlapiLogExecution("ERROR", "Resuming script because of " + state.reason
+				+ ".  Size = " + state.size);
+        return;
+    } else if (state.status == 'FAILURE') {
+        nlapiLogExecution("ERROR", "Failed to create recovery point. Reason = "
+				+ state.reason + " / Size = " + state.size);
+    }
+}
+
+function checkGovernance() {
+    var context = nlapiGetContext();
+    if (context.getRemainingUsage() < MINIMUM_USAGE) {
+        var state = nlapiYieldScript();
+        if (state.status == 'FAILURE') {
+            nlapiLogExecution("ERROR",
+					"Failed to yield script, exiting: Reason = " + state.reason
+					+ " / Size = " + state.size);
+            throw "Failed to yield script";
+        }
+    }
+}
+

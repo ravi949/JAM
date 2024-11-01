@@ -1,0 +1,147 @@
+
+function auditLines(request,response){
+	var type = request.getParameter('custparam_type');
+    var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+    	
+	if (type == 'silo'){
+		
+//		nlapiLogExecution('debug','creating silo line');
+		try{
+			
+			var channel = request.getParameter('custparam_channel');
+			var location = request.getParameter('custparam_location');
+			var packSize = request.getParameter('custparam_packsize');
+			var item = request.getParameter('custparam_item');
+			var name = 'Silo Line for '+item;
+			var rcdId = request.getParameter('custparam_auditid');
+			var memo = request.getParameter('custparam_memo');
+			var invRec = request.getParameter('custparam_invadj');
+			var adjQty = parseFloat(request.getParameter('custparam_adjqty')).toFixed(0);
+			var line = request.getParameter('custparam_line');
+			var totalCost = request.getParameter('custparam_totalcost');
+			var isParent = request.getParameter('custparam_isparent');
+			var invoice = request.getParameter('custparam_invoice');
+			var unitCost = request.getParameter('custparam_oldcost');
+			
+	  	  	var rec = nlapiCreateRecord(entityId,{recordmode: 'dynamic'});
+	  	  	
+	  	  	rec.setFieldValue('custrecord_mb_siloed_line','T');
+	  	  	rec.setFieldValue('custrecord_mb_audit_channel',channel);
+	  	  	rec.setFieldValue('custrecord_mb_audit_location',location);
+	  	  	rec.setFieldValue('custrecord_mb_audit_packsize',packSize);
+	  	  	rec.setFieldValue('name','Silo Line for: '+item);
+	  	  	rec.setFieldValue('custrecord_mb_item',item);
+	    	rec.setFieldValue('custrecord_mb_audit_parent',rcdId);
+	    	rec.setFieldValue('custrecord_mb_memo',memo);
+	    	rec.setFieldValue('custrecord_mb_old_unit_cost',unitCost)
+	    	rec.setFieldValue('custrecord_mb_inventory_adjustment',invRec); // TO DO update field refs
+	    	rec.setFieldValue('custrecord_mb_audit_adj_qty',adjQty); // new q id
+	    	rec.setFieldValue('custrecord_mb_line',line); // stored lineId Value
+	    	rec.setFieldValue('custrecord_mb_inv_adj_saved',"F");
+	    	rec.setFieldValue('custrecord_mb_audit_total_cost',totalCost);
+        	rec.setFieldValue('custrecord_mb_audit_invoice',invoice);
+	    	
+	    	if (isParent == true) rec.setFieldValue('custrecord_mb_is_parent','T');
+	    	
+	    	var submit = nlapiSubmitRecord(rec);
+	    	
+//	    	nlapiLogExecution('debug','created silo line')
+	    	response.write(JSON.stringify('added silo line')); 
+	    	
+		} catch(err){
+			nlapiLogExecution('ERROR','suitelet error building silo line',err);
+		}
+    	
+	} else {
+		
+		if (type =='cost'){
+			try {
+				nlapiLogExecution('debug','in cost logic');
+				var channel = request.getParameter('custparam_channel');
+				var location = request.getParameter('custparam_location');
+				var packSize = request.getParameter('custparam_packsize');
+				var item = request.getParameter('custparam_item');
+				var name = 'Audit Line for '+item;
+				var rcdId = request.getParameter('custparam_auditid');
+				var memo = request.getParameter('custparam_memo');
+				var invRec = request.getParameter('custparam_invadj');
+				var adjQty = request.getParameter('custparam_adjqty');
+				var line = request.getParameter('custparam_line');
+				var totalCost = request.getParameter('custparam_totalcost');
+				var isParent = request.getParameter('custparam_isparent').toString();
+				var oldCost = request.getParameter('custparam_oldcost');
+				var newCost = request.getParameter('custparam_newcost');
+				var oldQ = request.getParameter('custparam_oldq');
+				var newQ = request.getParameter('custparam_newq');
+				var invoice = request.getParameter('custparam_invoice');
+				var PD = false;
+				var addRemove = request.getParameter('custparam_add_remove');
+				var fix5025 = request.getParameter('custparam_fix5025');
+				var isPD = request.getParameter('custparam_ispd')
+				nlapiLogExecution('audit','IS PD',isPD);
+				
+				if (isPD && isPD!=null){
+					isPD = isPD.toString()
+				} 
+				
+				if (isParent && isParent!=null){
+					isParent=isParent.toString();
+				}
+				//nlapiLogExecution('debug','is parent',isParent);
+				
+//				if (oldQ <=0 && (isParent == true || isParent=='T')) {
+//					PD = true;
+//					nlapiLogExecution('debug','creating pd line');
+//				}
+				
+	      	  	var rec = nlapiCreateRecord(entityId,{recordmode: 'dynamic'});
+	      	  	
+	      	  	rec.setFieldValue('name','Audit Line for: '+item);
+	      	  	
+	        	if (isPD==true || isPD===true|| isPD=='true') {
+	        		nlapiLogExecution('audit','ISPD is true for the next rec')
+	        		rec.setFieldValue('custrecord_mb_new_pd','T');
+	        	}
+	      	  	rec.setFieldValue('custrecord_mb_item',item);
+	        	rec.setFieldValue('custrecord_mb_audit_parent',rcdId);
+	        	rec.setFieldValue('custrecord_mb_memo',memo)
+	        	rec.setFieldValue('custrecord_mb_inventory_adjustment',invRec); // TO DO update field refs
+	        	rec.setFieldValue('custrecord_mb_old_quantity', parseInt(oldQ)); // old q id
+	        	rec.setFieldValue('custrecord_mb_old_unit_cost',oldCost) // old cost id
+	        	rec.setFieldValue('custrecord_mb_new_quantity',parseInt(newQ)); // new q id
+	        	rec.setFieldValue('custrecord_mb_new_unit_cost',newCost); // new cost id
+	        	rec.setFieldValue('custrecord_mb_audit_adj_qty',parseInt(adjQty));
+	        	//rec.setFieldValue('custrecord_mb_date',date) // date time of change
+	        	rec.setFieldValue('custrecord_mb_line',line) // stored lineId Value
+	        	rec.setFieldValue('custrecord_mb_inv_adj_saved',"F"); // inv adjustment saved;
+	        	
+	        	if (isParent == true || isParent =='true') {
+	        		rec.setFieldValue('custrecord_mb_is_parent','T')
+        		};
+        		
+	        	rec.setFieldValue('custrecord_mb_audit_invoice',invoice);
+	        	
+				if (addRemove =='Add'){
+					rec.setFieldValue('custrecord_mb_added_line','T');
+				} else if (addRemove =='Remove'){
+					rec.setFieldValue('custrecord_mb_removed_line','T')
+				}
+				if (fix5025 == 'T'){
+					rec.setFieldValue('custrecord_mb_fix_5025','T');
+				}
+	        	
+	        	var submit = nlapiSubmitRecord(rec);
+	        	nlapiLogExecution('audit','submitted record',submit);
+	        	
+	        	response.write(JSON.stringify('added cost/PD line'));
+	        	
+			} catch(err){
+				nlapiLogExecution('ERROR','suitelet error building cost/pd line',err);
+			}
+		}
+	}
+} 
+
+
+
+

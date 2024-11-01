@@ -1,0 +1,36 @@
+/*
+ * Script to call finish PD logic after submit of an audit record
+ * 
+ * 
+ * 
+*/
+
+function afterSubmit(type){
+	try {
+		if (type=='create'){
+			var rec = nlapiLoadRecord(nlapiGetRecordType(),nlapiGetRecordId());
+			var date = rec.getFieldValue('custrecord_mb_runtime_date');
+			var newDate = getDate(date,-1);
+			nlapiLogExecution('debug','Date for finish PDs to Process',newDate);
+			nlapiLogExecution('debug','in if Block')
+			var scriptId = 'customscript_mb_scheduled_finish_pds'//nlapiGetContext().getScriptId();
+			var status = nlapiScheduleScript(scriptId,null,{'custscript_mb_finish_pd_date':newDate});
+			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+		}
+	} catch(err){
+		nlapiLogExecution('debug','Error in AfterSubmit',JSON.stringify(err));
+	}
+};
+
+function getDate(date,addDays){
+	if (addDays ==null || addDays == ''){
+		addDays = 0;
+	}
+	var dateToSet = new Date(date);
+
+	var newDate = nlapiAddDays(dateToSet,addDays);
+	var result = nlapiDateToString(newDate,'date')
+	
+	return result;
+}
+

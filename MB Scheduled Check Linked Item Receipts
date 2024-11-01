@@ -1,0 +1,267 @@
+/*/
+ * Script to check for Item receipts which are linked to a journal entry which have been modified each day. 
+ * 
+ * 
+ */
+
+var MINIMUM_USAGE = 200;
+var irSearchId = 'customsearch_mb_prev_day_linked_ir';
+var irSearchName = 'Previous Day Linked Item Receipt Search (CODE LINKED DO NOT CHANGE)';
+var jeSearchId = 'customsearch_mb_linked_je';
+var jeSearchName = 'Previous Day Linked Journal Entry Search (CODE LINKED DO NOT CHANGE)';
+
+function scheduled(){
+	checkItemReceipts();
+	submitNewReceipts();
+};
+
+function checkItemReceipts(){
+	var fromEmail = '1423';// production user to send email from
+//	var toEmail = ['Lucas@mibar.net','Pramod@mibar.net','kyle@hudsonenvelope.com','andrew@jampaper.com'] ;
+	var toEmail = ['Lucas@mibar.net','Pramod@mibar.net','kyle@hudsonenvelope.com','andrew@jampaper.com','deon@hudsonenvelope.com','min@hudsonenvelope.com','lindah@mibar.net'] ;
+
+	var emailBody = '';
+	var emailSubject = 'Linked Item Receipts that were modified in the previous day';
+	
+	try {
+		
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('lastmodifieddate',null,'on','yesterday'));
+		filters.push(new nlobjSearchFilter('mainline',null,'is','T'));
+		
+		var search = generateSavedSearchResults(irSearchId,irSearchName,filters,'T',null,'F',null)[0];
+		
+		var arrChanged = new Array();
+	
+		if (search){
+
+			for (var i=0;i<search.length;i++){
+				
+				//nlapiLogExecution('debug','in for loop');
+				var sr = search[i];
+				var srId = sr.getId();
+
+				var filters2 = new Array();
+				filters2.push(new nlobjSearchFilter('mainline',null,'is','F'));
+				filters2.push(new nlobjSearchFilter('internalid',null,'anyof',srId));
+	//			filters2.push(new nlobjSearchFilter('creditamount',null,'greaterthan','0.00').setOr(true), "OR",[new nlobjSearchFilter('debitamount',null,'greaterthan','0.00')]);
+//				filters2.push(new nlobjSearchFilter('creditamount',null,'greaterthan','0.00').setOr(true));
+//				filters2.push(new nlobjSearchFilter('debitamount',null,'greaterthan','0.00').setOr(true));
+//	
+				var columns2 = new Array();
+				columns2.push(new nlobjSearchColumn('fxamount'));
+				columns2.push(new nlobjSearchColumn('fxamount','custbodymb_journal_entry_id',null));
+				
+				var search2 = generateSavedSearchResults(irSearchId,irSearchName,filters2,'T',columns2,'T',null)[0];
+				
+				if (search2){
+					
+					var irCredAmt = 0;
+					var irDebAmt = 0;
+					var jeCredAmt = 0;
+					var jeDebAmt = 0;
+					
+					for (var j=0;j<search2.length;j++){
+						
+						var result = search2[j];
+						var irAmt = parseFloat(result.getValue('fxamount'));
+						var jeAmt = parseFloat(result.getValue('fxamount','custbodymb_journal_entry_id',null));
+						
+						if (irAmt<0){
+							irDebAmt= irDebAmt+irAmt;
+						} else {
+							irCredAmt = irCredAmt+irAmt
+						}
+						
+						if (jeAmt<0){
+							jeDebAmt = jeDebAmt+jeAmt;
+						} else {
+							jeCredAmt = jeCredAmt+jeAmt;
+						}
+						
+					}
+					
+					var credDiff = jeCredAmt - irCredAmt;
+					var debDiff = jeDebAmt - irDebAmt;
+//					nlapiLogExecution('debug','cred diff // deb diff',credDiff+' // '+debDiff);
+					
+					if (credDiff!=0 || debDiff!=0){
+						arrChanged.push(srId);
+					};
+					
+				} else {
+					nlapiLogExecution('debug','no search 2 results');
+					continue; 
+				}
+				continue; 
+			}
+		};
+		
+		if (arrChanged.length>0){
+			nlapiLogExecution('debug','arrchanged',arrChanged);
+	
+			var filters3 = new Array();
+			filters3.push(new nlobjSearchFilter('internalid',null,'anyof',arrChanged));
+			filters3.push(new nlobjSearchFilter('mainline',null,'is','T'));
+			
+			var columns3 = new Array();
+			columns3.push(new nlobjSearchColumn('tranid','custbodymb_journal_entry_id'));
+			columns3.push(new nlobjSearchColumn('tranid'));
+			
+			var search3 = nlapiSearchRecord('itemreceipt',null,filters3,columns3);
+			
+			if (search3){
+				emailBody+='Please check the list of Linked Item Receipts that were modified yesterday below to ensure that the linked Journal Entry does not need to be edited: \n ';
+				var arrIr = new Array();
+				
+				for (var k = 0;k<search3.length;k++){
+					
+					var res = search3[k];
+					var id = res.getId();
+					
+					if (arrIr.indexOf(id)!=-1) continue;
+					
+					arrIr.push(id);
+					
+					var a = 'Item Receipt #: '+res.getValue('tranid')+', ';
+					var b = 'Linked Journal Entry #: '+res.getValue('tranid','custbodymb_journal_entry_id');
+					emailBody+= ' \n '+a+b;
+				}
+			};
+			
+			if (emailBody!=''){
+				nlapiSendEmail(fromEmail, toEmail, emailSubject, emailBody);
+			}
+			nlapiLogExecution('debug','email body',emailBody);
+		} else {
+			return;
+		};
+	} catch(e){
+		nlapiLogExecution('error','Error Checking Linked Item Receipts Modified on the previous day.',JSON.stringify(e));
+	}
+}
+
+function submitNewReceipts(){
+	try{
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('datecreated',null,'on','yesterday'));
+		filters.push(new nlobjSearchFilter('type','createdfrom','anyof',['transferorder','trnfrord']));
+		filters.push(new nlobjSearchFilter('custbodymb_journal_entry_id',null,'anyof','@NONE@'));
+		
+		var columns = new Array();
+		columns.push(new nlobjSearchColumn('internalid'));
+		
+		var search = nlapiSearchRecord('itemreceipt',null,filters,columns);
+		
+		if (search){
+			if (search.length>0){
+				nlapiLogExecution('debug','searhch',JSON.stringify(search));
+				for (i=0;i<search.length;i++){
+					var rec = nlapiLoadRecord('itemreceipt',search[i].getValue('internalid'));
+					var submit = nlapiSubmitRecord(rec);
+					continue;
+				}
+			}
+		}
+	} catch(err){
+		nlapiLogExecution('error','error',JSON.stringify(err));
+	}
+	
+}
+
+function generateSavedSearchResults(savedSearchId , savedSearchName , addFilters , enableAddFilters , addColumns, enableAddColumns,recType) {
+	var generatedResults = new Array();
+	var searchColumns    = new Array();
+	if( ((addFilters != '' && addFilters != null) || enableAddFilters != 'T' ) || (addColumns != '' && addColumns != null) || enableAddColumns != 'T' ){
+		try{
+			
+			var remainingUsage = nlapiGetContext().getRemainingUsage()
+			//nlapiLogExecution('audit','remaining usage',remainingUsage)
+			if (remainingUsage<= MINIMUM_USAGE) {
+			    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+				var scriptId = nlapiGetContext().getScriptId();
+				var status = nlapiScheduleScript(scriptId);
+				nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+				return null;
+			}
+			
+			//Executing a Saved search with received savedSearchId
+			var recordSearch = nlapiLoadSearch('', savedSearchId);
+			if( addFilters != '' && addFilters != null && enableAddFilters == 'T' ){
+				recordSearch.addFilters( addFilters );
+			};
+			
+			if (addColumns !='' && addColumns!=null && enableAddColumns =='T'){
+				recordSearch.addColumns(addColumns);
+			};
+
+			var resultSet=recordSearch.runSearch();
+			var resultslice = '';
+			var id=0;
+			//nlapiLogExecution("debug", "sr length", resultSet.length);
+			//nlapiLogExecution('debug','resultSlice.length',resultslice.length);
+			
+			for(var t=0 ; resultslice.length >= 1000 || t == 0 ; t++){
+
+				resultslice = resultSet.getResults(id, id+1000 );
+				if (resultslice != null && resultslice != ''){
+					generatedResults = generatedResults.concat(resultslice);
+					id += resultslice.length;
+				}
+				//nlapiLogExecution("debug", "output length", generatedResults.length);
+			}
+			searchColumns = recordSearch.getColumns();
+			return [generatedResults , searchColumns ];
+		}catch(ERR_SavedSearch){
+			nlapiLogExecution('ERROR','Error Occured in Processing SavedSearch('+savedSearchName+':'+savedSearchId+') Results Block ',JSON.stringify(ERR_SavedSearch));
+			return [generatedResults , searchColumns ];
+		}
+	}
+	return [generatedResults , searchColumns ];
+}
+
+function errText(_e) {
+
+	try {
+		
+		var err_title = 'Unexpected error';
+		var err_description = '';
+		var err_type = 'error';
+		var logTitle = '';
+
+		
+		if (_e){
+			
+			if (_e.getCode() == 9999){
+				err_title = 'Journal Entry Already Created';
+				err_description = 'See custom tab for Journal Entry Link';
+				err_type = 'audit';
+				logTitle = 'Journal Entry already created'
+				
+			} else if ( _e instanceof nlobjError ) {
+				
+				err_description = err_description + ' ' + _e.getCode() + '|' + _e.getDetails();
+				logTitle = 'Unexpected GL Plugin Error'
+				
+			} else {
+				
+				err_description = err_description + ' ' + _e.toString();
+				logTitle = 'Unexpected GL Plugin Error'
+				
+			};
+		};
+		
+		var fullError = err_title+': '+err_description;
+		
+		var errorArray = new Array();
+		
+		errorArray[0] = err_type;
+		errorArray[1] = fullError;
+		errorArray[2] = logTitle;
+		
+		return errorArray;
+		
+	} catch(ex) {
+		nlapiLogExecution('ERROR', 'Error performing error logging',errorArray);
+	};
+};

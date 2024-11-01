@@ -1,0 +1,94 @@
+/**
+ * Module Description
+ * Version            - 1.0
+ * Script Type        - ScheduleScript
+ * Description        - Update Item receipt
+ * Author             - Mibar
+ */
+
+var MINIMUM_USAGE = 1000;
+function updateItemReceipt(type) {
+	try
+	{
+		//nlapiLogExecution('debug', 'here 1 ', type);		
+		// load csv file from file cabinet
+		var arrLines = nlapiLoadFile(8401).getValue().split(/\n|\n\r/);
+		nlapiLogExecution('debug', 'here 2 ', arrLines);
+		var recId         ='';
+		// loop to get all lines
+		for (var i = 0; i < arrLines.length; i++) {
+			//nlapiLogExecution('debug', 'here 2-2-2 ', arrLines);
+			
+			if (nlapiGetContext().getRemainingUsage() <= MINIMUM_USAGE)
+			{
+				nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left('
+						+ nlapiGetContext().getRemainingUsage()
+						+ ') . Exiting and rescheduling script.');
+				setRecoveryPoint();
+				checkGovernance();
+			}
+			
+			try
+			{
+				var content = arrLines[i].split(',');
+				// add the columns of the CSV file here
+				internalID  = '';
+				var internalID  = content[0];
+				internalID = internalID.replace(/\s/g, "");
+				if (internalID !='')
+				{
+				nlapiLogExecution('debug', 'here 3 ', 'InternalID '+internalID);
+				 
+				// create customer deposit using fields from csv
+				record = '';
+				var record = nlapiLoadRecord('itemreceipt', internalID); //,{recordmode: 'dynamic'});
+				nlapiLogExecution('debug', 'here 4 ',  '--');
+				var itmRptMemo = record.getFieldValue("memo");
+				record.setFieldValue('memo', itmRptMemo+'.');
+			    var id = nlapiSubmitRecord(record); //, true, true);
+				nlapiLogExecution('debug', 'here 3:id ', internalID+' id after commit' +id);
+				id = ''
+				}
+              
+			}
+			catch(e){
+				nlapiLogExecution('debug', 'Error created during Item receipt :', e);
+				continue;
+			}
+					
+		}
+	}
+	catch(e){
+				nlapiLogExecution('debug', 'Error created during Item receipt :', e);
+			}
+}
+
+function setRecoveryPoint() {
+    var state = nlapiSetRecoveryPoint();
+    if (state.status == 'SUCCESS')
+        return; 
+	
+    if (state.status == 'RESUME') 
+    {
+        nlapiLogExecution("ERROR", "Resuming script because of " + state.reason
+				+ ".  Size = " + state.size);
+        return;
+    } else if (state.status == 'FAILURE') 
+    {
+        nlapiLogExecution("ERROR", "Failed to create recovery point. Reason = "
+				+ state.reason + " / Size = " + state.size);
+    }
+}
+
+function checkGovernance() {
+    var context = nlapiGetContext();
+    if (context.getRemainingUsage() < MINIMUM_USAGE) {
+        var state = nlapiYieldScript();
+        if (state.status == 'FAILURE') {
+            nlapiLogExecution("ERROR",
+					"Failed to yield script, exiting: Reason = " + state.reason
+					+ " / Size = " + state.size);
+            throw "Failed to yield script";
+        }
+    }
+}

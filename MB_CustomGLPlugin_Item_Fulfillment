@@ -1,0 +1,464 @@
+/*
+ * 
+ * 
+ */
+
+
+function customizeGlImpact(transactionRecord, standardLines, customLines, book){
+	
+	const minimumUsage = 100;
+      //Pramod
+        var txnCreatedFrom = transactionRecord.getFieldValue("memo");
+        if (txnCreatedFrom.toLowerCase().indexOf('dropship') >= 0)
+          {
+                //nlapiLogExecution("debug", "customGL itemReceipt", txnCreatedFrom);
+          return;
+          }
+          
+        //Pramod
+       	
+	try{
+		var jeTranId = '';
+      	var createdFromText = emptyIfNull(transactionRecord.getFieldText('createdfrom'));
+//      	var tranId = 
+		
+		if (createdFromText.toLowerCase().indexOf('transfer order')< 0) {
+			
+          	nlapiLogExecution('debug','not created from transfer order')
+			return;
+			
+		} 
+		
+		var context = nlapiGetContext();
+		var remainingUsage = '';
+		var createdFrom = emptyIfNull(transactionRecord.getFieldValue('createdfrom'))		
+		var toSubsidiary = getToSub(createdFrom);
+		if (checkMarkup(toSubsidiary)!=true) return; // checks to see if the sub has a transfer markup, if not kill// gets toSubsidiary from created from rec
+		var date = transactionRecord.getFieldValue('trandate');
+		var subsidiary = transactionRecord.getFieldValue('subsidiary');
+		var toLocation = transactionRecord.getFieldValue('transferlocation'); 
+		var fromLocation = getFromLocation(createdFrom); // gets ToLocation from created from to get location channel
+//		nlapiLogExecution('debug','to location',toLocation);
+		//var toLocation = transactionRecord.getFieldValue('transferlocation');
+		var locChannel = getLocChannel(toLocation)
+		
+		if (toLocation != '20' || locChannel =='') {
+			nlapiLogExecution('Audit','Wrong Location or no Location Channel to Stamp','toLocation: '+toLocation+', locChannel: '+locChannel);
+			return;
+		};
+		
+		var filters = new Array();
+		
+		var columns = new Array();
+			columns.push(new nlobjSearchColumn('custrecord_mb_account'));
+			columns.push(new nlobjSearchColumn('custrecord_mb_account_to_set'));
+		
+		var search = nlapiSearchRecord('customrecord_mb_gain_loss_acct',null,filters,columns);
+		var accts = new Array();
+		var acctsToSet = new Array()
+		
+		if (search){
+//			nlapiLogExecution('debug','have search');
+			for (var sr = 0;sr<search.length;sr++){
+				
+				var searchResult = search[sr];
+				accts.push(searchResult.getValue('custrecord_mb_account'))
+				acctsToSet.push(searchResult.getValue('custrecord_mb_account_to_set'));
+//				nlapiLogExecution('debug','acct',searchResult.getValue('custrecord_mb_account'));
+	
+			}
+		}
+//		nlapiLogExecution('debug','accts',accts);
+		
+		var acctAmts = new Array();
+		
+		if (accts.length>0){
+			for (var i=0;i<accts.length;i++){
+				// create identical array of each of their amounts;
+				var arrObj = new Object();
+				arrObj = {
+					'creditAmt':0,
+					'debitAmt':0
+				}
+				acctAmts.push(arrObj);
+//				nlapiLogExecution('debug','arrObj',JSON.stringify(arrObj));
+			}
+		}
+		
+		//var toSubsidiaryAmount = 0;
+		//var fromSubsidiaryAmount = 0;
+		
+		var lineCount = standardLines.getCount();
+		
+		for (var i=0;i<lineCount;i++) {
+			
+			var line = standardLines.getLine(i);
+
+			var account = emptyIfNull(line.getAccountId());
+			var cls = emptyIfNull(line.getClassId());
+			var location = emptyIfNull(line.getLocationId());
+			var subsidiary = emptyIfNull(line.getSubsidiaryId());
+			var creditAmt = emptyIfNull(line.getCreditAmount());
+			var debitAmt = emptyIfNull(line.getDebitAmount());
+			
+//			if (account == '299'){
+////				nlapiLogExecution('debug','accts',JSON.stringify(accts));
+//				var index = accts.indexOf(account.toString());
+////				if (index!=-1) nlapiLogExecution('debug','5140 acct index',accts.indexOf(account));
+//			}
+			
+			if (accts.indexOf(account.toString())!=-1  && creditAmt != 0){ //&& subsidiary == toSubsidiary){
+				var index = accts.indexOf(account.toString());
+				var obj = acctAmts[index];
+				
+				obj.creditAmt = obj.creditAmt+parseFloat(creditAmt)
+				nlapiLogExecution('debug','obj',JSON.stringify(obj));
+				
+			}
+			
+			if (accts.indexOf(account.toString())!=-1 && debitAmt != 0) {
+				
+				var index = accts.indexOf(account.toString());
+				var obj = acctAmts[index];
+				
+				obj.debitAmt = obj.debitAmt+parseFloat(debitAmt);
+				nlapiLogExecution('debug','obj',JSON.stringify(obj));
+
+			}
+			
+			remainingUsage = context.getRemainingUsage()
+			
+			if (parseInt(remainingUsage)<=minimumUsage) {
+				
+				var usageError = nlapiCreateError(999,'Hit usage minimum, usage remaining:'+remainingUsage);
+				throw usageError;
+				
+			}
+		}
+		
+		for (var z = 0;z<accts.length;z++){
+			
+			var obj = acctAmts[z];
+			var acct = accts[z];
+			try {
+				if (parseFloat(obj.creditAmt)!=0 || parseFloat(obj.debitAmt)!=0){
+					
+					var amt = parseFloat(obj.creditAmt)-parseFloat(obj.debitAmt);
+					
+					if (amt<0) {
+						var offSetAcct = acctsToSet[z];
+						var setAcct = accts[z]
+						var offSetChannel = parseInt(locChannel);
+						var setChannel = null;
+					} else {
+						var offSetAcct = accts[z];
+						var setAcct = acctsToSet[z];
+						var offSetChannel = null;
+						var setChannel = parseInt(locChannel);
+					};
+					
+					nlapiLogExecution('debug','os channel/set channel',offSetChannel+', set channel '+setChannel);
+					
+					addCustomLineOffset(absVal(amt.toFixed(2)),customLines,subsidiary,offSetAcct,null,offSetChannel,fromLocation); 
+
+					addCustomLine(absVal(amt.toFixed(2)),customLines,subsidiary,null,setAcct,setChannel,fromLocation); 
+			
+				} else {
+						
+					var err = nlapiCreateError(9998,'Acct information or Amounts were missing from this txn', true)
+					throw err;
+			          
+		        }
+			} catch(e){
+				var errorLog = errText(e);
+				
+				if (errorLog){
+					nlapiLogExecution(errorLog[0],errorLog[2],errorLog[1]);
+					
+				} else {
+					nlapiLogExecution('error','unexpected error',e);
+				}
+			}
+
+		}
+	} catch(e){
+		
+		var errorLog = errText(e);
+		
+		if (errorLog) {
+			
+			nlapiLogExecution(errorLog[0],errorLog[2],errorLog[1]);
+			
+		} else {
+			nlapiLogExecution('error','unexpected error',e);
+		}
+	}
+	
+}
+
+function errText(_e) {
+
+	try {
+		
+		var err_title = 'Unexpected error';
+		var err_description = '';
+		var err_type = 'error';
+		var logTitle = '';
+
+		
+		if (_e){
+			
+			if (_e.getCode() == 9999){
+				err_title = 'Journal Entry Already Created';
+				err_description = 'See custom tab for Journal Entry Link';
+				err_type = 'audit';
+				logTitle = 'Journal Entry already created'
+				
+			} else if ( _e instanceof nlobjError ) {
+				
+				err_description = err_description + ' ' + _e.getCode() + '|' + _e.getDetails();
+				logTitle = 'Unexpected GL Plugin Error'
+				
+			} else {
+				
+				err_description = err_description + ' ' + _e.toString();
+				logTitle = 'Unexpected GL Plugin Error'
+				
+			};
+		};
+		
+		var fullError = err_title+': '+err_description;
+		
+		var errorArray = new Array();
+		
+		errorArray[0] = err_type;
+		errorArray[1] = fullError;
+		errorArray[2] = logTitle;
+		
+		return errorArray;
+		
+	} catch(_e) {
+		nlapiLogExecution('ERROR', 'Error performing error logging',errorArray);
+	};
+};
+
+function addCustomLine(amount,customLines,entityId,accountDb,accountCr,channel,location){
+	
+	var memo = 'Custom Line'
+	if (channel !=null){
+		channel = parseInt(channel);
+	} 
+	// add new line
+	if(emptyIfNull(accountDb)!=""){
+		var newLine = customLines.addNewLine();
+		//newLine.setEntityId(entityId);
+		newLine.setDebitAmount(parseFloat(amount));
+		//newLine.setCreditAmount(amount);
+		newLine.setAccountId(parseInt(accountDb));
+		newLine.setClassId(channel);
+		//newLine.setMemo(memo);
+		newLine.setLocationId(parseInt(location));
+	}
+	//nlapiLogExecution("DEBUG","set Debit");
+
+	if(emptyIfNull(accountCr)!=""){
+		var newLine = customLines.addNewLine();
+		//newLine.setEntityId(entityId);
+		newLine.setCreditAmount(parseFloat(amount));
+		newLine.setClassId(channel);
+		//newLine.setDebitAmount(amount);
+		newLine.setAccountId(parseInt(accountCr));
+		newLine.setLocationId(parseInt(location))
+
+		//newLine.setMemo(memo);
+	}
+	//nlapiLogExecution("DEBUG","set Credit");
+}
+
+function addCustomLineOffset(amount,customLines,entityId,accountDb,accountCr,channel,location){
+
+	//var memo = "Custom GL Plugin Script Offset";
+	
+	// add new line
+	if (channel !=null){
+		channel = parseInt(channel);
+	} 
+	if(emptyIfNull(accountDb)!=""){
+		var newLine = customLines.addNewLine();
+		//newLine.setEntityId(entityId);
+		newLine.setDebitAmount(parseFloat(amount));				// this is a reversing entry
+		//newLine.setCreditAmount(amount);
+		newLine.setAccountId(parseInt(accountDb));
+		//newLine.setMemo(memo);
+		newLine.setClassId(channel);
+		newLine.setLocationId(parseInt(location));
+
+	}
+	
+	//nlapiLogExecution("DEBUG","set Debit offset");
+
+	if(emptyIfNull(accountCr)!=""){
+		var newLine = customLines.addNewLine();
+		//newLine.setEntityId(entityId);
+		newLine.setCreditAmount(parseFloat(amount));				// this is a reversing entry
+		//newLine.setDebitAmount(amount);
+		newLine.setAccountId(parseInt(accountCr));
+		//newLine.setMemo(memo);
+		newLine.setClassId(channel);
+		newLine.setLocationId(parseInt(location));
+
+	}
+	
+	//nlapiLogExecution("DEBUG","set Credit offset");
+}
+
+function emptyIfNull(val) { return val == null ? "" : val; }
+
+function createJournalEntry(amount,subsidiary,accountcr,accountdb,date,key,location,irId){
+	
+	var initvalues = new Array();
+		initvalues.bookje = 'T'
+	var rec = nlapiCreateRecord('journalentry',initvalues)
+	rec.setFieldValue('trandate',date);
+	rec.setFieldValue('subsidiary',subsidiary);
+	rec.setFieldValue('custbody_mb_ir_key',key); // tranId
+	rec.setFieldValue('custbody_mb_item_receipt_link',irId)
+	
+	rec.selectNewLineItem('line'); // offsetting line (credit clearing account)
+	rec.setCurrentLineItemValue('line','account',accountcr);
+	rec.setCurrentLineItemValue('line','credit',amount);
+
+	rec.setCurrentLineItemValue('line','location',location)
+	rec.commitLineItem('line');
+	
+	rec.selectNewLineItem('line'); // correcting line (debit dueTO)
+	rec.setCurrentLineItemValue('line','account',accountdb);
+	rec.setCurrentLineItemValue('line','debit',amount);
+	//rec.setCurrentLineItemValue('line','memo',memo)
+	rec.setCurrentLineItemValue('line','location',location)
+	rec.commitLineItem('line');
+	
+	var id = nlapiSubmitRecord(rec);
+	//var key = createdFrom+id;
+	
+	//nlapiSubmitField('journalentry', id, 'custbody_mb_ir_key',key);
+	
+	//nlapiLogExecution('debug','created journal entry','id: '+id);
+	return id;
+	
+}
+
+function getLocChannel(location){
+	if (location){
+		try {
+			var filters = new Array();
+			filters.push(new nlobjSearchFilter('internalid',null,'anyof',location));
+			var columns = new Array();
+			columns.push(new nlobjSearchColumn('custrecordcustrecord_mb_location_channel'));
+			var search = nlapiSearchRecord('location',null,filters,columns);
+			if (search){
+				var channel = search[0].getValue('custrecordcustrecord_mb_location_channel');
+//				nlapiLogExecution('debug','channel',channel);
+				return channel;
+			} else {
+				nlapiLogExecution('debug','No Locations Found');
+				return ''
+			}
+		} catch(e){
+			return e;
+			//nlapiLogExecution('error','Error Getting Location Channel',errText(e));
+		}
+	} else {
+		return ''
+	}
+}
+
+function oppVal(int){
+	var num = parseFloat(int)
+	return (num*-1)
+}
+
+function getFromLocation(createdFrom){
+	if (createdFrom){
+		
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('internalid',null,'anyof',createdFrom));
+		
+		var columns = new Array();
+		columns.push(new nlobjSearchColumn('location'));
+		
+		var search = nlapiSearchRecord('transaction',null,filters,columns);
+		
+		if (search){
+			var location = search[0].getValue('location');
+			if (location){
+//				nlapiLogExecution('debug','location',location)
+				return location;
+			} else {
+				return '';
+			}
+		} else {
+			return '';
+		}
+		
+	} else {
+		return '';
+	}
+}
+
+function checkMarkup(toSub){
+	if (toSub){
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('internalid',null,'anyof',toSub));
+		var columns = new Array();
+		columns.push(new nlobjSearchColumn('custrecord_mb_subs_markup_transfer_price'));
+		
+		var search = nlapiSearchRecord('subsidiary',null,filters,columns);
+		
+		if (search){
+			
+			var check = false;
+			var markup = search[0].getValue('custrecord_mb_subs_markup_transfer_price');
+//			nlapiLogExecution('debug','markup',markup);
+			if (parseFloat(markup)!=0){
+				check = true;
+			} 
+			return check;
+		} else {
+			return false;
+		}
+	} else {
+		return false;
+	}
+}
+
+function getToSub(createdFrom){
+	if (createdFrom){
+		var filters = new Array();
+		filters.push(new nlobjSearchFilter('internalid',null,'anyof',createdFrom));
+		var columns = new Array();
+		columns.push(new nlobjSearchColumn('tosubsidiary'));
+		
+		var search = nlapiSearchRecord('transaction',null,filters,columns);
+		
+		if (search){
+			var toSub = search[0].getValue('tosubsidiary');
+//			nlapiLogExecution('debug','toSub',toSub);
+			return toSub
+		} else {
+			return '';
+		}
+	} else {
+		return '';
+	}
+};
+
+function absVal(int){
+	var num = parseFloat(int)
+	if (num < 0) {
+		return (num*-1)
+	} else {
+		return num;
+	}
+};
+

@@ -1,0 +1,1806 @@
+//
+var MINIMUM_USAGE = 200;
+var searchInvAdj = "customsearch_mb_inv_adjustments_by_date"; // base search
+var searchName = 'Inventory Adjustment Lines (LINKED TO CODE DO NOT EDIT)';
+var newInvAdjAcctId = '664'; // check in production?
+var auditRecSearchId = 'customsearch_mb_inv_adj_audit_search';
+var auditRecSearchName = 'Inventory Adjustment Audit Search (CODE LINKED)';
+//var itemSearch = 'customsearch_mb_avg_cost_lpp';
+//var itemSearchName = 'Item Average Cost and LPP (LINKED TO CODE DO NOT EDIT)';
+var auditLineSearch = 'customsearch_mb_inv_adj_audit_sublist';
+var updateScript = 'customscript_mb_sched_update_lines';
+var avgCostArray = [];
+var usageError = nlapiCreateError('111','Not enough usage remaining, rescheduling script.',true);
+
+function scheduled(){
+    try{
+        var priorDay = nlapiGetContext().getSetting('SCRIPT','custscript_mb_set_date_to_pd');
+        var date = getDate('4/8/2019',0)//priorDay != 'T' ? getDate(nlapiGetContext().getSetting('SCRIPT','custscript_mb_as_of_pd_date'),0) : getDate(nlapiGetContext().getSetting('SCRIPT','custscript_mb_as_of_pd_date'),-1); // rename parameter;
+        nlapiLogExecution('debug','date',date);
+        var locations = ['11']//,'12','13'];
+
+        // for (i=0;i<locations.length;i++){
+        //     var loc = locations[i];
+        //     switch(loc){
+        //         case '11' : var locName = '_185_';
+        //             break;
+        //         case '12' : var locName = '_179_';
+        //             break;
+        //         case '13' : var locName = '_227';
+        //             break;
+        //         default : var locName =  '_';
+        //     };
+
+        var prefix = '2019Apr08_';
+        var invAdj = nlapiLoadRecord('inventoryadjustment',2693209);//newInvAdjRec.insertRecord(prefix,date,'18',null);
+        var finishPDs = 'Success';//finishPds(invAdj,date,loc);
+        //var maxDate = nlapiGetContext().getSetting('SCRIPT','custscript_mb_max_date_pds'); // rename parameter;
+        if (finishPDs=='Success'){
+            //nlapiLogExecution('debug','Finish PDs was successful','Date: '+date);
+            var maskedPDs = maskPDs(invAdj,date,prefix);
+            if (maskedPDs=='Success'){
+                nlapiLogExecution('debug','Mask PDs was successful','Date: ',date);
+            }
+        }
+        // continue;
+        // }
+    } catch(err){
+        nlapiLogExecution('error','ERROR IN PARENT FUNCTION',JSON.stringify(err));
+        nlapiSendEmail('1423',['Lucas@mibar.net','netsuite@mibar.net'],'Error in Create asOf Inv Adj Parent Function',JSON.stringify(err));
+        //throw nlapiCreateError('ERROR CALLING FINISH PD LOGIC',JSON.stringify(err),true);
+    }
+}
+
+function finishPds(invAdj,date,location){
+    // function to build PDs for negative items from a given date;
+    try {
+
+        nlapiLogExecution('debug','date',date);
+        nlapiLogExecution('debug','invAdj',JSON.stringify(invAdj));
+        nlapiLogExecution('debug','location',location);
+        var firstDate = '12/31/2017';
+        //var locations = ['11','12','13'];
+
+        var PDs = new Array();
+
+        var filters = new Array();
+        filters.push(new nlobjSearchFilter('trandate',null,'within',[firstDate,date]));
+        filters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+        filters.push(new nlobjSearchFilter('binnumberquantity',null,'lessthan','0').setSummaryType('sum'));
+        filters.push(new nlobjSearchFilter('location',null,'anyof',location));
+        // var columns = new Array();
+        //
+        // columns.push(new nlobjSearchColumn('item',null,'group'));
+        // columns.push(new nlobjSearchColumn('location',null,'group'));
+        // columns.push(new nlobjSearchColumn('internalid','binNumber','group'))
+        // columns.push(new nlobjSearchColumn('binnumberquantity',null,'SUM'));
+
+        var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+        if (remainingUsage<= MINIMUM_USAGE) {
+            nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+            var scriptId = nlapiGetContext().getScriptId();
+            var status = nlapiScheduleScript(scriptId);
+            nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+            throw usageError;
+        }
+
+        var search = generateSavedSearchResults('customsearch_mb_inventory_valuation_d_16','Search for Negative Bins',filters,true,null,false,null);//nlapiSearchRecord('inventoryadjustment',null,filters, columns);
+        nlapiLogExecution('debug','first search res',JSON.stringify(search));
+
+        if (search){
+            var itemsToSearch = search.map(createItemLocObj);
+            nlapiLogExecution('debug','items to search length',itemsToSearch.length);
+            nlapiLogExecution('debug','items to search ',JSON.stringify(itemsToSearch));
+
+            for (len=0;len<itemsToSearch.length;len++){
+
+                try {
+                    var item = itemsToSearch[len].item;
+                    var location = itemsToSearch[len].location;
+                    var bin = itemsToSearch[len].bin;
+                    var quantity = itemsToSearch[len].quantity;
+                    if (location =='22') continue;
+
+                    var tranDate = date;
+
+                    var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+                    if (remainingUsage<= MINIMUM_USAGE) {
+                        nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                        var scriptId = nlapiGetContext().getScriptId();
+                        var status = nlapiScheduleScript(scriptId);
+                        nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                        throw usageError;
+                    }
+
+                    var filters2 = new Array();
+                    filters2.push(new nlobjSearchFilter('item',null,'anyof',item));
+                    filters2.push(new nlobjSearchFilter('location',null,'anyof',location));
+                    filters2.push(new nlobjSearchFilter('trandate',null,'onorbefore',tranDate));
+                    if (bin!=null && bin!='') filters2.push(new nlobjSearchFilter('internalid','binNumber','anyof',bin));
+                    if (firstDate!='') filters2.push(new nlobjSearchFilter('trandate',null,'onorafter',firstDate));
+                    //filters2.push(new nlobjSearchFilter('binnumberquantity',null,'lessthan',0))
+
+                    var columns2 = new Array();
+                    columns2.push(new nlobjSearchColumn('lastpurchaseprice','item',null));
+                    columns2.push(new nlobjSearchColumn('amount'));
+                    columns2.push(new nlobjSearchColumn('cost','item',null));
+                    columns2.push(new nlobjSearchColumn('internalid','binNumber',null));
+                    columns2.push(new nlobjSearchColumn('internalid'));
+                    columns2.push(new nlobjSearchColumn('tranid'));
+
+                    var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_4','Inventory Valuation Search',filters2,'T',columns2,'T',null)
+                    var itemSearch = arrSearch[0];
+                    var columns = arrSearch[1];
+
+                    if (itemSearch){
+
+                        var shortQty = quantity;
+
+                        if (shortQty<0) {
+                            try {
+                                var resNum = '';
+                                // get first non inv_adj_script cost;
+                                for (n = 0; n < itemSearch.length; n++) {
+                                    if (itemSearch[n].getValue('tranid').search('inv_adj_script') == -1 && itemSearch[n].getValue('amount') != 0) {
+                                        resNum = n;
+                                        break;
+                                    } else {
+                                        continue;
+                                    }
+                                };
+
+                                if (resNum == '') resNum = 0;
+                                var res = itemSearch[resNum];
+                                var fifoCost = res.getValue(columns[5]);
+                                var currAvgCost = res.getValue(columns[6]);
+                                var itemLpp = res.getValue('lastpurchaseprice', 'item');
+                                var purchasePrice = res.getValue('cost', 'item');
+                                var costs = [fifoCost, currAvgCost, itemLpp, purchasePrice];
+                                var sources = ['[FIFO]', '[CURR AVG COST]', '[ITEM LPP]', '[ITEM PP]']; //fifo cost from search,avg cost from search, item lpp, item purchase price
+                                var reason = '';
+                                var costToUse = '';
+                                for (p = 0; p < costs.length; p++) {
+                                    var cost = ''
+                                    if ((costs[p] != 0 && costs[p] != null && costs[p] != '') && costs[p].indexOf('ERROR') == -1) {
+                                        costToUse = costs[p];
+                                        reason = sources[p]
+                                        break;
+                                    } else if (p == costs.length - 1 && cost == '') {
+                                        throw nlapiCreateError('999', 'No valid results for cost in search results', true);
+                                    }
+                                }
+
+                            } catch (err) {
+                                nlapiLogExecution('error', 'Could not find avg cost from search for item', JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+                                fromEmail = '1423';
+                                toEmail = ['lucas@mibar.net', 'netsuite@mibar.net']//,'netsuite@mibar.net','pramodj@mibar.net'];
+                                emailSubject = 'Issue getting Avg Cost for PD';
+                                emailBody = 'Could not find average cost with the details below \n Error: ' + JSON.stringify(err) + ' \n Item: ' + item + ', location: ' + location;
+                                nlapiSendEmail(fromEmail, toEmail, emailSubject, emailBody)
+                                if (err instanceof nlobjError) {
+                                    if (err.getCode() == 111) {
+                                        throw usageError;
+                                    }
+                                }
+                            }
+
+                            if (bin == '' || bin == null) {
+                                var binToUse = res.getValue('internalid', 'binNumber', 'group');
+                            } else {
+                                var binToUse = bin;
+                            }
+
+                            var obj = {
+                                'item': item,
+                                'location': location,
+                                'qty': absVal(shortQty),
+                                'cost': costToUse,
+                                'reason': reason,
+                                'bin': binToUse,//itemSearch[0].getValue('internalid','binNumber'),
+                                //'bin' : itemSearch[0].getValue('binNumber'),
+                                'packsize': itemSearch[0].getValue('custitem_mb_item_pack_size', 'item'),
+                                'memo': ''
+
+                            };
+
+                            PDs.push(obj);
+                        }
+
+                    };
+                    continue;
+
+                } catch(err){
+                    nlapiLogExecution('error','Could not find avg cost from search in FinishPD logic',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+                    // fill in vals for nlapiSendEmail('')
+                    fromEmail = '1423'
+                    toEmail = ['lucas@mibar.net','netsuite@mibar.net']
+                    emailSubject = 'Issue Finishing PDs'
+                    emailBody = 'Could not find average cost with the details below \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location;
+                    sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+                    if (err instanceof nlobjError){
+                        if (err.getCode() == 111){
+                            throw usageError;
+                        }
+                    }
+                    return 'Failure';
+                }
+                // }
+            } //else {
+            //return 'Success';
+            //}
+        }
+        // time to create the PDs if there are any that need to be created
+        try {
+            var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+            if (remainingUsage<= MINIMUM_USAGE) {
+                nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                var scriptId = nlapiGetContext().getScriptId();
+                var status = nlapiScheduleScript(scriptId);
+                nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                throw usageError;
+            }
+
+            if (PDs.length>0){
+                var counter = 0;
+                var arrItemLoc = new Array();
+                var rec = nlapiLoadRecord('inventoryadjustment',invAdj);
+                if (rec.getFieldValue('custbody_mb_finished_pds')=='T') return 'Success';
+
+                for (len3 = 0;len3<PDs.length;len3++){
+
+                    var item = PDs[len3].item;
+                    var location = PDs[len3].location;
+                    var itemLocVal = item.toString()+location.toString();
+                    if (arrItemLoc.indexOf(itemLocVal)!=-1){
+                        continue;
+                    }
+
+                    var invRec = null
+                    var line = null
+                    var isParent = true;
+
+                    if (PDs[len3].memo =='') {
+                        var memo = 'Created as part of 5025 Finish PD creation script [SCR_NEW_FPD] '+PDs[len3].reason;
+                    } else {
+                        var memo = PDs[len3].memo;
+                    };
+
+                    var bins = [{
+                        'bin': PDs[len3].bin,
+                        'binQty':PDs[len3].qty
+                    }];
+
+                    if (bins[0].bin==null || bins[0].bin=='') {
+                        nlapiLogExecution('debug','Missing Bin for Item/location',item+', '+location);
+                        continue;
+                    }
+                    var cost = absVal(PDs[len3].cost);
+                    var packsize = PDs[len3].packsize;
+                    var qty = PDs[len3].qty;
+                    var channel = '';
+
+                    arrItemLoc.push(itemLocVal);
+
+                    // custAuditRec.addLine(audit, item, qty, '', absVal(qty),cost,'','',isParent,memo,location,true,true);
+                    newInvAdjRec.addInvLines(rec,item,qty,'',location,cost,bins,'',invAdj,memo,packsize,item,true);
+                    counter = counter+1
+                };
+
+                var memo = rec.getFieldValue('memo');
+                var newMemo = memo+'#[SCR_EOD_PD]: '+counter.toString();
+                rec.setFieldValue('memo',newMemo);
+                rec.setFieldValue('custbody_mb_finished_pds','T');
+
+                try {
+                    // try and submit the record - if the unexpected error occurs, reschedule the script. If it is a bin error, send email alert, if it is a different error throw error;
+                    var submit = nlapiSubmitRecord(rec);
+                } catch(err){
+                    nlapiSendEmail('1423', ['Lucas@mibar.net'], 'Error In submitting inv adj rec', 'Please check the execution log and restart the script');
+                    //var submit = nlapiSubmitRecord(invAdjRec);
+                    nlapiLogExecution('debug','error submitting inv record',submit);
+                    nlapiLogExecution("error", "suiteScript has encountered an error.", JSON.stringify(err));
+                    var dateToSched = getDate(date,0); // this will call the script for the same audit date, with is PD date+1
+                    var scriptId = nlapiGetContext().getScriptId();
+                    var status = nlapiScheduleScript(scriptId,null,{'custscript_mb_finish_pd_date':dateToSched});
+                    nlapiLogExecution('debug','Scheduled script status',status);
+
+                    if (err instanceof nlobjError){
+                        if (err.getCode() == 111){
+                            throw usageError;
+                        } else if (err.getCode()=='USER_ERROR'){
+                            var details = err.getDetails();
+//							nlapiLogExecution('debug','error details', details);
+                            if (details.search('The following Bin numbers are not available: ')!=-1){
+                                var bins = details.split('available:')[1];
+                                if (bins.search(',')!=-1){
+                                    var bins = bins.split(',');
+                                };
+                                throw nlapiCreateError('BIN_ERROR','Check Bins and fixDaysNegBins execution'+bins.toString(),true);
+                            };
+                        } else {
+                            throw nlapiCreateError('666',errText(err),true)
+                        }
+                    }
+                }
+
+            } else {
+                nlapiLogExecution('debug','No Finish PDs to Build');
+                nlapiSubmitField('inventoryadjustment',invAdj,'custbody_mb_finished_pds','T');
+                return 'Success';
+            };
+
+            return 'Success';
+        } catch(e){
+            nlapiLogExecution('error','error creating PDs at the EOD',JSON.stringify(e));
+            if (e instanceof nlobjError){
+                if (e.getCode() == 111){
+                    throw usageError;
+                }
+            }
+            return 'Failure';
+        };
+
+    } catch(err){
+        nlapiLogExecution('error','Finish PDs Error',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+        if (err instanceof nlobjError){
+            if (err.getCode() == 111){
+                throw usageError;
+            }
+        }
+        return 'Failure'
+        fromEmail = '1423'
+        toEmail = ['lucas@mibar.net','netsuite@mibar.net','pramodj@mibar.net']
+        emailSubject = 'Issue Finishing PDs'
+        emailBody = 'Finish PD Error \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location+', bin: '+bin+'.';
+        sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+    };
+};
+
+function maskPDs(invAdj,date,prefix){
+    // function to create PDs from other locations where possible.
+    try {
+        var maskCt = 0;
+        var firstDate= '12/31/2017';
+
+        var PDs = new Array();
+
+        var filters = new Array();
+        var invId = invAdj.getId();
+        filters.push(new nlobjSearchFilter('internalid',null,'anyof',invId));
+        filters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+        filters.push(new nlobjSearchFilter('quantity',null,'greaterthan',0).setSummaryType('sum'));
+//		filters.push(new nlobjSearchFilter('memo',null,'doesnotcontain','Removing'));
+//		filters.push(new nlobjSearchFilter('custrecord_mb_new_pd',null,'is','T'));
+        //filters.push(new nlobjSearchFilter('custrecord_mb_runtime_date','custrecord_mb_audit_parent','on',date));
+
+        var columns = new Array();
+
+        columns.push(new nlobjSearchColumn('item',null,'group'));
+        columns.push(new nlobjSearchColumn('location',null,'group'));
+        columns.push(new nlobjSearchColumn('internalid','binNumber','group'))
+        columns.push(new nlobjSearchColumn('binnumberquantity',null,'SUM'));
+
+        var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+        if (remainingUsage<= MINIMUM_USAGE) {
+            nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+            var scriptId = nlapiGetContext().getScriptId();
+            var status = nlapiScheduleScript(scriptId);
+            nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+            throw usageError;
+        }
+
+        var search = nlapiSearchRecord('inventoryadjustment',null,filters, columns);
+
+        if (search){
+            var itemsToSearch = search.map(createItemLocObj);
+            //nlapiLogExecution('debug','itemsToSearch',JSON.stringify(itemsToSearch));
+            var arrFillNegQty = new Array();
+            for (len=0;len<itemsToSearch.length;len++){
+
+                try {
+                    var item = itemsToSearch[len].item;
+                    var location = itemsToSearch[len].location;
+                    var bin = itemsToSearch[len].bin;
+                    var binName = itemsToSearch[len].binName;
+                    var quantity = itemsToSearch[len].quantity;
+                    if (location =='22') continue;
+
+                    var tranDate = date;
+
+                    var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+                    if (remainingUsage<= MINIMUM_USAGE) {
+                        nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                        var scriptId = nlapiGetContext().getScriptId();
+                        var status = nlapiScheduleScript(scriptId);
+                        nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                        throw usageError;
+                    }
+
+                    if(location=='11'||location =='12'||location=='13'){
+                        var searchLoc = ['11','12','13']
+                    } else {
+                        searchLoc==location;
+                    }
+
+                    var filters2 = new Array();
+                    filters2.push(new nlobjSearchFilter('item',null,'anyof',item));
+                    filters2.push(new nlobjSearchFilter('location',null,'anyof',searchLoc));
+                    filters2.push(new nlobjSearchFilter('trandate',null,'within',[firstDate,tranDate]));
+                    // filters2.push(new nlobjSearchFilter('trandate',null,'onorafter',firstDate));
+                    filters2.push(new nlobjSearchFilter('binnumberquantity',null,'greaterthan',0).setSummaryType('sum'));
+
+                    var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_7','Mask Inventory Search',filters2,'T',null,'F',null);
+                    var itemSearch = arrSearch[0];
+                    var columns = arrSearch[1];
+
+                    if (itemSearch){
+                        // Mask the basic quantities from other locations first;
+                        //  nlapiLogExecution('debug','itemsearch',JSON.stringify(itemSearch));
+                        var otherLoc = itemSearch.filter(function(res){
+                            if (res.getValue('binnumber',null,'group')!=binName){
+                                if (res.getValue('binnumberquantity',null,'sum')>0){
+                                    return true;
+                                };
+                            };
+                            return false;
+                        });
+
+                        var totalMaskQty = quantity;
+                        //nlapiLogExecution('debug','quantity',quantity);
+
+                        if (otherLoc.length>0){
+                            //nlapiLogExecution('debug','other loc',JSON.stringify(otherLoc));
+                            for (o=0;o<otherLoc.length;o++){
+                                if (otherLoc[o].getValue('binnumber',null,'group')!=binName){
+                                    //nlapiLogExecution('debug','other loc2',JSON.stringify(otherLoc))
+                                    if (totalMaskQty>0){
+
+                                        var mask = otherLoc[o];
+                                        var maskQty = mask.getValue('binnumberquantity',null,'sum');
+                                        var maskQtyDiff = totalMaskQty - parseFloat(maskQty);
+
+                                        if (maskQtyDiff<0){
+                                            var qtyToAdd = totalMaskQty;
+                                            totalMaskQty= totalMaskQty - qtyToAdd;
+                                        } else {
+                                            var qtyToAdd = parseFloat(maskQty);
+                                            totalMaskQty = totalMaskQty - qtyToAdd;
+                                        };
+
+                                        var maskLocation = mask.getValue('location',null,'group');
+                                        var maskBin = mask.getValue('internalid','binnumber','group');
+                                        //nlapiLogExecution('debug','maskloc',maskLocation);
+                                        //nlapiLogExecution('debug','maskBin',maskBin);
+                                        var filters3 = new Array();
+                                        filters3.push(new nlobjSearchFilter('item',null,'anyof',item));
+                                        filters3.push(new nlobjSearchFilter('location',null,'anyof',maskLocation));
+                                        filters3.push(new nlobjSearchFilter('internalid','binNumber','anyof',maskBin));
+
+                                        var columns2 = new Array();
+                                        columns2.push(new nlobjSearchColumn('lastpurchaseprice','item',null));
+                                        columns2.push(new nlobjSearchColumn('cost','item',null));
+                                        columns2.push(new nlobjSearchColumn('internalid','binnumber',null));
+                                        columns2.push(new nlobjSearchColumn('tranid'));
+
+                                        var arrOtherLocSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_4','Inventory Valuation Search for Cost',filters3,'T',columns2,'T',null);
+                                        var otherLocSearch = arrOtherLocSearch[0];
+                                        var columns = arrOtherLocSearch[1];
+
+                                        if (otherLocSearch){
+                                            if (otherLocSearch.length>1){
+                                               // nlapiLogExecution('debug','otherLocSearch',JSON.stringify(otherLocSearch));
+                                                var resNum = ''
+                                                for (n=0;n<otherLocSearch.length;n++){
+                                                    if (otherLocSearch[n].getValue('tranid').search('inv_adj_script')==-1){
+                                                        resNum = n;
+                                                        break;
+                                                    } else {
+                                                        continue;
+                                                    }
+                                                };
+
+                                                if (resNum=='') resNum =0;
+                                                var res = otherLocSearch[resNum];
+                                                var fifoCost = res.getValue(columns[5]);
+                                                var currAvgCost = res.getValue(columns[6]);
+                                                var itemLpp = parseFloat(res.getValue('lastpurchaseprice','item'));
+                                                var purchasePrice = parseFloat(res.getValue('cost','item'));
+                                                var costs = [fifoCost,currAvgCost,itemLpp,purchasePrice];
+                                                var sources = ['[FIFO]','[CURR AVG COST]','[ITEM LPP]','[ITEM PP]']; //fifo cost from search,avg cost from search, item lpp, item purchase price
+                                                var reason = '';
+                                                var costToUse ='';
+                                                for (p=0;p<costs.length;p++){
+                                                    var cost=''
+                                                    if ((costs[p]!=0 && costs[p]!=null && costs[p]!='') && costs[p].indexOf('ERROR')==-1){
+                                                        costToUse = parseFloat(costs[p]);
+                                                        reason = sources[p]
+                                                        break;
+                                                    } else if (p==costs.length-1 && cost==''){
+                                                        throw nlapiCreateError('999','No valid results for cost in search results',true);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            nlapiLogExecution('debug','No cost results for this other location');
+                                            continue;
+                                        }
+
+                                        var obj = {
+                                            'item':item,
+                                            'location' : maskLocation,
+                                            'qty' : -qtyToAdd,
+                                            'cost' : absVal(costToUse),
+                                            'reason' : reason,
+                                            'bin' : maskBin,//itemSearch[0].getValue('internalid','binNumber'),
+                                            'packsize': 1,//res.getValue('custitem_mb_item_pack_size','item'),
+                                            'memo' : 'Transfer from alternate Bin/Location to fix negative inventory as of 4/8/19'
+                                        };
+                                        //	nlapiLogExecution('debug','obj in maskpd',JSON.stringify(obj));
+                                        if (obj.cost<0) {
+                                            nlapiLogExecution('debug','negative cost','Item: '+item+' location: '+maskLocation+' reason: '+reason);
+                                            continue;
+                                        };
+
+                                        PDs.push(obj);
+                                        arrFillNegQty.push({'item':obj.item,'bin':obj.bin});
+                                        continue;
+
+                                    } else if (totalMaskQty=0){
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    continue;
+
+                } catch(err){
+                    nlapiLogExecution('error','Could not find avg cost from search in MaskPD logic',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+                    fromEmail = '1423'
+                    toEmail = ['lucas@mibar.net']//'netsuite@mibar.net','pramodj@mibar.net']
+                    emailSubject = 'Issue Finishing PDs'
+                    emailBody = 'Issue Masking PDs \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location;
+                    sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+                    if (err instanceof nlobjError){
+                        if (err.getCode() == 111){
+                            throw usageError;
+                        }
+                    }
+                    return 'Failure';
+                }
+            }
+        } else {
+            return 'Success';
+        };
+
+        // time to create the masking lines
+        try {
+
+            var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+            if (remainingUsage<= MINIMUM_USAGE) {
+                nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                var scriptId = nlapiGetContext().getScriptId();
+                var status = nlapiScheduleScript(scriptId);
+                nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                throw usageError;
+            }
+
+            if (PDs.length>0){
+                var recToDelete = fillNegBins(arrFillNegQty,prefix);
+
+                var counter = 0;
+                var arrItemLoc = new Array();
+                var rec = invAdj;//nlapiLoadRecord('inventoryadjustment',invAdj);
+
+                var currValue = rec.getFieldValue('estimatedtotalvalue');
+
+                for (len3 = 0;len3<PDs.length;len3++){
+
+                    var item = PDs[len3].item;
+                    var location = PDs[len3].location;
+                    var itemLocVal = item.toString()+location.toString();
+                    if (arrItemLoc.indexOf(itemLocVal)!=-1){
+                        continue;
+                    };
+
+                    var invRec = null
+                    var line = null
+                    var isParent = true;
+
+                    if (PDs[len3].memo=='' || PDs[len3].memo==null) {
+                        var memo = 'Created as part of 5025 PD creation script [SCR_NEW_PD] '+PDs[len3].reason.toString();
+                    } else {
+                        var memo = PDs[len3].memo.toString()+PDs[len3].reason.toString();
+                    };
+
+                    var bins = [{
+                        'bin': PDs[len3].bin,
+                        'binQty':PDs[len3].qty
+                    }];
+
+                    if (bins[0].bin==null || bins[0].bin==''){ //|| bins[0].bin=='484') {
+                        nlapiLogExecution('debug','Missing Bin for Item/location',item+', '+location);
+                        continue;
+                    };
+                    var cost = absVal(PDs[len3].cost);
+                    var packsize = PDs[len3].packsize;
+                    var qty = PDs[len3].qty;
+                    var channel = '';
+
+                    arrItemLoc.push(itemLocVal);
+
+                    // custAuditRec.addLine(audit, item, qty, '', absVal(qty),cost,'','',isParent,memo,location,true,true);
+                    newInvAdjRec.addInvLines(rec,item,qty,'',location,cost,bins,'',invAdj,memo.toString(),packsize,item,true);
+
+                    maskCt = maskCt+1
+                };
+
+                var memo = rec.getFieldValue('memo');
+                var newMemo = memo+'#[SCR_EOD_MASK]: '+maskCt.toString();
+
+                rec.setFieldValue('memo',newMemo);
+                rec.setFieldValue('custbody_mb_masked_pds','T');
+
+                try {
+                    // try and submit the record - if the unexpected error occurs, reschedule the script. If it is a bin error, send email alert, if it is a different error throw error;
+                    var submit = nlapiSubmitRecord(rec);
+                    nlapiDeleteRecord('inventoryadjustment',recToDelete);
+                } catch(err){
+                    nlapiSendEmail('1423', ['Lucas@mibar.net','netsuite@mibar.net'], 'Error In submitting inv adj rec/Deleting recToDelet', 'Please check the execution log and restart the script');
+                    nlapiLogExecution('debug','error submitting inv record',submit);
+                    nlapiLogExecution("error", "suiteScript has encountered an error.", JSON.stringify(err));
+                    var dateToSched = getDate(date,1);
+                    var scriptId = nlapiGetContext().getScriptId();
+                    var status = nlapiScheduleScript(scriptId,null,{'custscript_mb_finish_pd_date':dateToSched});
+                    nlapiLogExecution('debug','Scheduled script status',status);
+
+                    if (err instanceof nlobjError){
+                        if (err.getCode() == 111){
+                            throw usageError;
+                        } else if (err.getCode()=='USER_ERROR'){
+                            var details = err.getDetails();
+//								nlapiLogExecution('debug','error details', details);
+                            if (details.search('The following Bin numbers are not available: ')!=-1){
+                                var bins = details.split('available:')[1];
+                                if (bins.search(',')!=-1){
+                                    var bins = bins.split(',');
+                                };
+                                throw nlapiCreateError('BIN_ERROR','Check Bins and fixDaysNegBins execution'+bins.toString(),true);
+                            };
+                        } else {
+                            throw nlapiCreateError('666',errText(err),true)
+                        }
+                    }
+                }
+            } else {
+                nlapiLogExecution('debug','No Maskable lines found');
+                nlapiSubmitField('inventoryadjustment',invAdj,'custbody_mb_masked_pds','T');
+                return 'Success';
+            };
+
+            return 'Success';
+        } catch(e){
+            nlapiLogExecution('error','error masking PDs at the EOD',JSON.stringify(e));
+//			nlapiLogExecution('debug','PD that caused fail: '+len3,JSON.stringify(PDs[len3]))
+            if (e instanceof nlobjError){
+                if (e.getCode() == 111){
+                    throw usageError;
+                }
+            }
+            return 'Failure';
+        };
+
+    } catch(err){
+        nlapiLogExecution('error','Mask PDs Error',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+        if (err instanceof nlobjError){
+            if (err.getCode() == 111){
+                throw usageError;
+            }
+        }
+        return 'Failure'
+//		// fill in vals for nlapiSendEmail('')
+//		fromEmail = '1423'
+//		toEmail = ['lucas@mibar.net','netsuite@mibar.net','pramodj@mibar.net']
+//		emailSubject = 'Issue Finishing PDs'
+//		emailBody = 'Could not find average cost with the details below \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location+', bin: '+bin+'.';
+//		sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+    };
+};
+
+function fillNegBins(arr,prefix){
+    // fill negative bins with dummy inventory to be deleted after mask PDs runs;
+
+    var date = new Date();
+    date = getDate(date,2);
+
+    var searchLoc = ['11','12','13']
+
+    var items = arr.map(function(res,index){
+        return res.item;
+    })
+    var bins = arr.map(function(res,index){
+        return res.bin;
+    })
+
+    var filters2 = new Array();
+    if (arr.length>0) filters2.push(new nlobjSearchFilter('item',null,'anyof',items));
+    filters2.push(new nlobjSearchFilter('location',null,'anyof',searchLoc));
+    filters2.push(new nlobjSearchFilter('internalid','binNumber','anyof',bins));
+    filters2.push(new nlobjSearchFilter('trandate',null,'onorafter','12/31/2017'));
+    //filters2.push(new nlobjSearchFilter('quantity',null,'lessthan',1).setSummaryType('sum'));
+
+    var columns2 = new Array();
+    columns2.push(new nlobjSearchColumn('internalid','binNumber','group'));
+    columns2.push(new nlobjSearchColumn('formulanumeric',null,'avg').setFormula('round({item.locationaveragecost},5)'));
+
+    var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_7','Inventory Valuation Search',filters2,'T',columns2,'T',null)
+    var itemSearch = arrSearch[0];
+    var columns = arrSearch[1];
+
+    if (itemSearch){
+        var invAdj = newInvAdjRec.insertRecord(prefix.toString()+'_TOBEDELETED_',date,'18',null);
+        for (w=0;w<itemSearch.length;w++){
+            var res = itemSearch[w];
+            var item = res.getValue('item',null,'group');
+            var qty = absVal(res.getValue('binnumberquantity',null,'sum'))+30000;
+            var bin = res.getValue('internalid','binNumber','group');
+            var binName = res.getValue('binnumber',null,'group');
+            if (binName ==null || binName =='- None -') continue;
+            var bins = [{'bin':bin,'binQty':qty}];
+            var location = res.getValue('location',null,'group');
+            var cost = absVal(res.getValue('formulanumeric',null,'avg'));
+
+            newInvAdjRec.addInvLines(invAdj,item,qty,null,location,cost,bins,'[CURR AVG COST]',null,'DUMMY ADJ TO ALLOW FOR MASK PD LOGIC','1',null,true);
+
+        };
+
+        var submit = nlapiSubmitRecord(invAdj);
+        nlapiLogExecution('debug','submit',submit);
+        return submit;
+    };
+
+
+};
+
+function deleteBinAdj(recId){
+    try{
+        if (recId){
+            nlapiDeleteRecord('inventoryadjustment',recId);
+        }
+    } catch(err){
+        nlapiLogExecution('Error',"Error deleting yesterday's bin adj",JSON.stringify(err));
+        nlapiSendEmail('1423',['Lucas@mibar.net','netsuite@mibar.net'],'Error deleting an adjustment to be deleted', 'Please check the 5030 Inventory Adjustment account to make sure there are no records to be deleted');
+    }
+}
+
+function sendDailyUpdate(internalId,date){
+    var toEmails = ['Lucas@mibar.net','Andrew@jampaper.com','Kyle@hudsonenvelope.com','pramod@mibar.net'];
+    try{
+        var emailSubject = 'Completed Processing for this date: '+date;
+        var pdObj = getPDInfo(internalId);
+        var pdInfo = 'PD Total Value : '+pdObj.amount+', PD 5025 built lines: '+pdObj.normalPDs+', PD EOD Lines: '+ pdObj.EODPDS+', PD Masked Lines: '+pdObj.MASKPDS+ ' \n ';
+        var pcObj = getPCInfo(date);
+        var pcInfo = 'PC Total Value: '+pcObj.amount+', PC Total # Records: '+pcObj.numRecs + ' \n ';
+
+        var emailBody = ' \n '+pcInfo+' \n '+pdInfo;
+        nlapiSendEmail('1423',['Lucas@mibar.net','netsuite@mibar.net'],emailSubject,emailBody);
+        return 'Success';
+    } catch(err){
+        nlapiLogExecution('error','Error sending daily update',JSON.stringify(err));
+        return 'Failure';
+    }
+}
+
+function getPDInfo(internalId){
+    try{
+        var objToReturn = {};
+        var rec = nlapiLoadRecord('inventoryadjustment',internalId);
+        var amount = rec.getFieldValue('estimatedtotalvalue');
+        objToReturn.amount = amount;
+        var memo = rec.getFieldValue('memo');
+        var arrMemo = memo.split('#');
+        objToReturn.normalPDs = arrMemo[1];
+        objToReturn.EODPDS = arrMemo[2];
+        objToReturn.MASKPDS = arrMemo[3];
+        var totalLines = rec.getLineItemCount('inventory');
+        objToReturn.lines = totalLines;
+        return objToReturn;
+
+    } catch(err){
+        nlapiLogExecution('debug','err getting PD balance',JSON.stringify(err));
+        return null;
+    }
+}
+
+function getPCInfo(date){
+    try{
+        var date = getDate(date,0);
+
+        var filterToAdd = new Array()
+        filterToAdd.push(new nlobjSearchFilter('account',null,'anyof','595'))
+        filterToAdd.push(new nlobjSearchFilter('trandate',null,'on',date));
+        filterToAdd.push(new nlobjSearchFilter('mainline',null,'is','T'));
+
+        var columnToAdd = new Array();
+        columnToAdd.push(new nlobjSearchColumn('amount',null,'sum'));
+        columnToAdd.push(new nlobjSearchColumn('trandate',null,'group').setSort(true));
+        columnToAdd.push(new nlobjSearchColumn('formulanumeric',null,'sum').setFormula('1'));
+        columnToAdd.push(new nlobjSearchColumn('formulanumeric',null,'sum').setFormula('case when abs({amount})>1 then 1 else 0 end'));
+
+        var search = nlapiSearchRecord('inventoryadjustment',null,filterToAdd,columnToAdd);
+
+        if (search){
+            if (search[0]){
+                var objToReturn = {};
+                objToReturn.amount = search[0].getValue('amount',null,'sum');
+                objToReturn.numRecs = search[0].getValue(columnToAdd[2]);
+                objToReturn.badRecs = search[0].getValue(columnToAdd[3]);
+                return objToReturn;
+            }
+        }
+    } catch(err){
+//		return JSON.stringify(err);
+        nlapiLogExecution('debug','Error getting 5025 info',JSON.stringify(err));
+        return null;
+    }
+}
+/// We decided to omit the createFinalPds function below to save on usage/processing time;
+
+//function createFinalPds(invAdj,audit,date,arr){
+//	//create additional PD lines where inventory is negative, or
+//
+//	try {
+////		nlapiLogExecution('debug','invadj',invAdj);
+//
+//		var firstDate= '';
+//		if (date.search('2019')!=-1){
+//			firstDate = '1/1/2019'
+//		} else if (date.search('2018')){
+//			firstDate = '12/31/2017'
+//		}
+//
+//		var PDs = new Array();
+//		nlapiLogExecution('audit','date',date);
+//		var filters = new Array();
+//		filters.push(new nlobjSearchFilter('internalid',null,'anyof',invAdj));
+//		filters.push(new nlobjSearchFilter('mainline',null,'is','F'));
+//		filters.push(new nlobjSearchFilter('memo',null,'contains','[SCR_MASK]'));
+////		filters.push(new nlobjSearchFilter('custrecord_mb_new_pd',null,'is','T'));
+//		//filters.push(new nlobjSearchFilter('custrecord_mb_runtime_date','custrecord_mb_audit_parent','on',date));
+//
+//
+//		var columns = new Array();
+//
+//		columns.push(new nlobjSearchColumn('item',null,'group'));
+//		//columns.push(new nlobjSearchColumn('location',null,'group'));
+//		//columns.push(new nlobjSearchColumn('internalid','binNumber','group'))
+//		//columns.push(new nlobjSearchColumn('quantity',null,'sum'));
+//
+//    	var remainingUsage = nlapiGetContext().getRemainingUsage();
+//
+//		if (remainingUsage<= MINIMUM_USAGE) {
+//		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//			var scriptId = nlapiGetContext().getScriptId();
+//			var status = nlapiScheduleScript(scriptId);
+//			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+//			throw usageError;
+//		}
+//
+//		var search = nlapiSearchRecord('inventoryadjustment',null,filters, columns);
+////		nlapiLogExecution('debug','first search res',JSON.stringify(search));
+//
+//		if (search){
+////			var itemsToSearch = search.map(createItemLocObj);
+////			nlapiLogExecution('debug','Items To Search Array',JSON.stringify(itemsToSearch));
+//			var itemsToSearch=search.map(function(res,index){
+//				return res.getValue('item',null,'group');
+//			});
+//
+//			for (len=0;len<itemsToSearch.length;len++){
+//
+//				try {
+//					var item = itemsToSearch[len].item;
+//					var location = itemsToSearch[len].location;
+//					var bin = itemsToSearch[len].bin;
+//					var quantity = itemsToSearch[len].quantity;
+//					if (location =='22') continue;
+////					nlapiLogExecution('debug','item + loc',item+', '+location);
+//
+//					var tranDate = date;
+//
+//			    	var remainingUsage = nlapiGetContext().getRemainingUsage();
+//
+//					if (remainingUsage<= MINIMUM_USAGE) {
+//					    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//						var scriptId = nlapiGetContext().getScriptId();
+//						var status = nlapiScheduleScript(scriptId);
+//						nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+//						throw usageError;
+//					}
+//
+//					var locationGroup = ['11','12','13']
+//					if (locationGroup.indexOf(location)!=-1){
+//						var searchLocation = locationGroup
+//					} else {
+//						var searchLocation = location;
+//					};
+//
+//					var filters2 = new Array();
+//					filters2.push(new nlobjSearchFilter('item',null,'anyof',item));
+//					filters2.push(new nlobjSearchFilter('location',null,'anyof',searchLocation));
+//					filters2.push(new nlobjSearchFilter('trandate',null,'onorbefore',tranDate));
+//					if (firstDate!='') filters2.push(new nlobjSearchFilter('trandate',null,'onorafter',firstDate));
+//					filters2.push(new nlobjSearchFilter('quantity',null,'lessthan',0).setSummaryType('sum'));
+////					filters2.push(new nlobjSearchFilter('sum(quantity)',null,'greaterthan',0));
+////					filters2.push(new nlobjSearchFilter('internalid',null,'noneof',invAdj))
+//
+//					var columns2 = new Array();
+//					columns2.push(new nlobjSearchColumn('lastpurchaseprice','item'));
+//					columns2.push(new nlobjSearchColumn('cost','item'));
+//
+//					var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_7','Inventory Valuation Search',filters2,'T',null,'F',null)
+//					var groupedSearch = arrSearch[0];
+////					var columns = arrSearch[1];
+//
+//					if (groupedSearch){
+//						if (groupedSearch.length>0){
+//							for (q=0;q<groupedSearch.length;q++){
+//
+//								var shortQty = groupedSearch[q].getValue('quantity',null,'sum');
+//								var builderLocation = groupedSearch[q].getValue('location',null,'group');
+//								var builderBin = groupedSearch[q].getValue('internalid','binNumber','group');
+//
+//								if (shortQty<0){
+//									// creating non-masking PD it if the quantity is still short
+//									try{
+//
+//										filters2.push(new nlobjSearchFilter('location',null,'anyof',builderLocation));
+//										if (bin!=null && bin!='') filters2.push(new nlobjSearchFilter('internalid','binNumber','anyof',builderBin));
+//										var arrSearch2 = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_4','Inventory Valuation Search (NG)',filters2,'T',columns2,'T',null);
+//										var itemSearch = arrSearch2[0];
+//										var columns = arrSearch2[1];
+//
+//										var resNum = ''
+//										for (n=0;n<itemSearch.length;n++){
+//											if (itemSearch[n].getValue('internalid')!=invAdj){
+//												resNum = n;
+//												break;
+//											} else {
+//												continue;
+//											}
+//										}
+//										if (resNum == '') resNum = 0;
+//
+//										var res = itemSearch[resNum];
+//										var fifoCost = res.getValue(columns[5]);
+//										var currAvgCost = res.getValue(columns[6]);
+//										var itemLpp = res.getValue('lastpurchaseprice','item');
+//										var purchasePrice = res.getValue('cost','item');
+//										var costs = [fifoCost,currAvgCost,itemLpp,purchasePrice];
+//										var sources = ['[FIFO]','[CURR AVG COST]','[ITEM LPP]','[ITEM PP]']; //fifo cost from search,avg cost from search, item lpp, item purchase price
+//										var reason = '';
+//										var costToUse ='';
+//										for (p=0;p<costs.length;p++){
+//											var cost=''
+//											if ((costs[p]!=0 && costs[p]!=null && costs[p]!='') && costs[p].indexOf('ERROR')==-1){
+//												costToUse = costs[p];
+//												reason = sources[p]
+//												break;
+//											} else if (p==costs.length-1 && cost==''){
+//												throw nlapiCreateError('999','No valid results for cost in search results',true);
+//											}
+//										}
+//
+////										nlapiLogExecution('debug','cost to use',costToUse+', reason: '+reason);
+//
+//									} catch(err){
+//										nlapiLogExecution('error','Could not find avg cost from search for item',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+//										fromEmail = '1423';
+//										toEmail = ['lucas@mibar.net']//,'netsuite@mibar.net','pramodj@mibar.net'];
+//										emailSubject = 'Issue getting Avg Cost for PD';
+//										emailBody = 'Could not find average cost with the details below \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location;
+//										sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+//										if (err instanceof nlobjError){
+//											if (err.getCode() == 111){
+//												throw usageError;
+//											}
+//										}
+//									}
+//
+//									if (bin=='' || bin==null) {
+//										var binToUse = res.getValue('internalid','binNumber','group');
+//									} else {
+//										var binToUse = bin;
+//									}
+//
+//									var obj = {
+//											'item':item,
+//											'location' : location,
+//											'qty' : absVal(shortQty),
+//											'cost' : costToUse,
+//											'reason' : reason,
+//											'bin' : binToUse,//itemSearch[0].getValue('internalid','binNumber'),
+//											//'bin' : itemSearch[0].getValue('binNumber'),
+//
+//											'packsize':itemSearch[0].getValue('custitem_mb_item_pack_size','item'),
+//											'memo' : ''
+//									};
+//
+//									PDs.push(obj);
+//
+//								}
+//							}
+//						}
+//					};
+//					continue;
+//
+//				} catch(err){
+//					nlapiLogExecution('error','Could not find avg cost from search in FinishPD logic',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+//					// fill in vals for nlapiSendEmail('')
+//					fromEmail = '1423'
+//					toEmail = ['lucas@mibar.net']//'netsuite@mibar.net','pramodj@mibar.net']
+//					emailSubject = 'Issue Finishing PDs'
+//					emailBody = 'Could not find average cost with the details below \n Error: '+JSON.stringify(err)+'n\ Item: '+item+', location: '+location;
+//					sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody)
+//					if (err instanceof nlobjError){
+//						if (err.getCode() == 111){
+//							throw usageError;
+//						}
+//					}
+//					return 'Failure';
+//				}
+//			}
+//		} else {
+//			return 'Success';
+//		}
+//
+//		//nlapiLogExecution('debug','PDs',JSON.stringify(PDs));
+//		// time to create the PDs if there are any that need to be created
+//		try {
+//        	var remainingUsage = nlapiGetContext().getRemainingUsage();
+//
+//    		if (remainingUsage<= MINIMUM_USAGE) {
+//    		    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+//    			var scriptId = nlapiGetContext().getScriptId();
+//    			var status = nlapiScheduleScript(scriptId);
+//    			nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+//    			throw usageError;
+//    		}
+//
+//			if (PDs.length>0){
+//				var counter = 0;
+//				var arrItemLoc = new Array();
+//				var rec = nlapiLoadRecord('inventoryadjustment',invAdj)
+//
+//				for (len3 = 0;len3<PDs.length;len3++){
+//
+//					var item = PDs[len3].item;
+//					var location = PDs[len3].location;
+//					var itemLocVal = item.toString()+location.toString();
+//					if (arrItemLoc.indexOf(itemLocVal)!=-1){
+//						continue;
+//					};
+////					nlapiLogExecution('debug','PDs OBJ',JSON.stringify(PDs[len3]));
+//					var invRec = null
+//					var line = null
+//					var isParent = true;
+//					if (PDs[len3].memo='') var memo = 'Created as part of 5025 Finish PDs script [SCR_NEW_FPD] '+PDs[len3].reason;
+//					var bins = [{
+//							'bin': PDs[len3].bin,
+//							'binQty':absVal(PDs[len3].qty)
+//					}];
+//
+//					if (bins[0].bin==null || bins[0].bin=='') {
+//						nlapiLogExecution('debug','Missing Bin for Item/location',item+', '+location);
+//						continue;
+//					};
+//					var cost = absVal(PDs[len3].cost);
+//					var packsize = PDs[len3].packsize;
+//					var qty = PDs[len3].qty;
+//					var channel = '';
+//
+//					arrItemLoc.push(itemLocVal);
+////					if (qty<0){
+////						nlapiLogExecution('debug','Negative line would have been created','Item: '+item+', location: '+location+', quant: '+qty+', cost '+cost)
+////					};
+//
+//					custAuditRec.addLine(audit, item, qty, '', absVal(qty),cost,'','',isParent,memo,location,true,true);
+//					newInvAdjRec.addInvLines(rec,item,qty,'',location,cost,bins,'',invAdj,memo,packsize,item,true);
+//					counter = counter+1
+//				};
+////				if (submitRec==true){
+//				var memo = rec.getFieldValue('memo');
+//				var newMemo = memo+'#[SCR_EOD_PD]: '+counter.toString();
+//				rec.setFieldValue('memo',newMemo);
+//				nlapiSubmitRecord(rec);
+////				}
+////				return 'Failure';
+//			};
+//
+//			return 'Success';
+//		} catch(e){
+//			nlapiLogExecution('error','error creating PDs at the EOD',JSON.stringify(e));
+//			if (e instanceof nlobjError){
+//				if (e.getCode() == 111){
+//					throw usageError;
+//				}
+//			}
+//			return 'Failure';
+//		};
+//
+//	} catch(err){
+//		nlapiLogExecution('error','Finish PDs Error',JSON.stringify(err));//'Item: '+item+', location: '+location+', bin: '+bin);
+//		if (err instanceof nlobjError){
+//			if (err.getCode() == 111){
+//				throw usageError;
+//			}
+//		}
+//		return 'Failure'
+//	};
+//};
+
+
+function createItemLocObj(item,index){ // used in map function to create array of objects for PDs
+    var obj = {
+        'item': item.getValue('item',null,'group'),
+        'location' : item.getValue('location',null,'group'),
+        'bin':item.getValue('internalid','binnumber','group'),
+        'binName' : item.getValue('binnumber',null,'group'),
+        'quantity': item.getValue('binnumberquantity',null,'sum')
+    };
+    return obj;
+};
+
+function qtyReducer(total,res){ // used as function argument in reduce statement when getting sum of quantity from saved search;
+    var sum = total+parseFloat(res.getValue('binnumberquantity'));
+    return sum;
+}
+
+var custAuditRec = { // audit object
+    entityName: "customrecord_mb_inv_adj_audit",
+    //recordId : "",
+    insertRecord : function(tranDate){
+        var date = tranDate;
+
+        try{
+            var custRec = nlapiCreateRecord(this.entityName, {recordmode: 'dynamic'});
+            custRec.setFieldValue('custrecord_mb_runtime_date',date) // tran date
+            custRec.setFieldValue('name','Balance Inv Adj Script Ran on: '+date)
+            var recordId = nlapiSubmitRecord(custRec);
+
+        } catch(e){
+            nlapiLogExecution("error", "Insert Audit Record Error", errText(e));
+        }
+        //nlapiLogExecution('debug','audit rec id',recordId)
+
+        return (recordId);
+    },
+
+    addSiloLines : function(rcdId,invRec,item,location,adjQty,packSize,unitCost,line,memo,channel,isParent,totalCost){
+        var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+
+        try{
+
+            var remainingUsage = nlapiGetContext().getRemainingUsage()
+            //nlapiLogExecution('audit','remaining usage - in silo lines',remainingUsage)
+            if (remainingUsage<= MINIMUM_USAGE) {
+                nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                var scriptId = nlapiGetContext().getScriptId();
+                var status = nlapiScheduleScript(scriptId);
+                nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                throw usageError;
+            }
+
+            var arrParam = new Array();
+
+            arrParam['custparam_item'] = item;
+            arrParam['custparam_location'] = location;
+            arrParam['custparam_channel'] = channel;
+            arrParam['custparam_auditid'] = rcdId;
+            arrParam['custparam_memo'] = memo;
+            arrParam['custparam_invadj'] = invRec;
+            arrParam['custparam_adjqty'] = adjQty;
+            arrParam['custparam_line'] = line;
+            arrParam['custparam_totalcost'] = totalCost;
+            arrParam['custparam_isparent'] = isParent;
+            arrParam['custparam_oldcost'] = unitCost;
+            arrParam['custparam_packsize'] = packSize;
+            arrParam['custparam_type'] = 'silo';
+//
+            if(memo!=null){
+                try {
+                    var strMemo = memo.toString();
+                    //nlapiLogExecution('debug','strmemo val',strMemo);
+                    //nlapiLogExecution('debug','strmemo type',typeof strMemo);
+                    var split1 = strMemo.split('invoice');
+                    //nlapiLogExecution('debug','val',split1);
+
+                    if (split1!=null) var split2 = split1[1].split('is');
+                    if (split2!=null) var invoice = split2[0];
+                    if (invoice!=null) arrParam['custparam_invoice'] = invoice;
+                } catch(err){
+//							nlapiLogExecution('debug','issue splitting memo');
+                    arrParam['custparam_invoice'] = ''
+                }
+
+                //nlapiLogExecution('debug','invoice',arrParam['custparam_invoice'])
+            } else {
+                arrParam['custparam_invoice'] = ''
+            }
+            //nlapiLogExecution('debug','arrparam',arrParam.length);
+
+            var url = nlapiResolveURL('SUITELET','customscript_mb_suitelet_build_auditline','customdeploy_mb_build_audit_lines','external');
+            var response = nlapiRequestURL(url,arrParam);
+
+            var result = response.getBody();
+
+            //nlapiLogExecution('debug','silo line result',result);
+
+        } catch(e){
+            var error = errText(e);
+            nlapiLogExecution("error","suiteScript has encountered an error.",error);
+            if (e instanceof nlobjError){
+                if (e.getCode() == 111){
+                    throw usageError;
+                }
+            }
+        }
+    },
+    // update audit lines to reflect that parent adjustment has been submitted after
+
+    updateLines : function(invAdj,auditRec){
+        // removed/not used
+    },
+
+    addLine : function(rcdId, item, oldQ, oldCost, newQ,newCost,invRec,line,isParent,memo,location,isPD){
+        var entityId = 'customrecord_mb_inv_adj_audit_lines' //.entityId;
+
+        try{
+
+            //nlapiLogExecution('audit','remaining usage -- in add line',remainingUsage)
+            var remainingUsage = nlapiGetContext().getRemainingUsage();
+
+            if (remainingUsage<= MINIMUM_USAGE) {
+                nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                var scriptId = nlapiGetContext().getScriptId();
+                var status = nlapiScheduleScript(scriptId);
+                nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                throw usageError;
+            }
+//		    		nlapiLogExecution('debug','isParent',isParent);
+            var arrParam = new Array();
+            arrParam['custparam_item'] = item;
+            arrParam['custparam_auditid'] = rcdId;
+            arrParam['custparam_memo'] = memo;
+            arrParam['custparam_invadj'] = invRec;
+            arrParam['custparam_line'] = line;
+            arrParam['custparam_isparent'] = isParent;
+            arrParam['custparam_oldcost'] = oldCost;
+            arrParam['custparam_newcost'] = newCost;
+            arrParam['custparam_oldq'] = oldQ;
+            arrParam['custparam_newq'] = newQ;
+            arrParam['custparam_type'] = 'cost';
+            arrParam['custparam_fix5025'] = 'F';
+            arrParam['custparam_add_remove'] = '';
+            arrParam['custparam_ispd'] = isPD;
+
+            if(memo!=null){
+                try {
+                    var strMemo = memo.toString();
+                    //nlapiLogExecution('debug','strmemo val',strMemo);
+                    //nlapiLogExecution('debug','strmemo type',typeof strMemo);
+                    var split1 = strMemo.split('invoice');
+                    //nlapiLogExecution('debug','val',split1);
+
+                    if (split1!=null) var split2 = split1[1].split('is');
+                    if (split2!=null) var invoice = split2[0];
+                    if (invoice!=null) arrParam['custparam_invoice'] = invoice;
+                } catch(err){
+//							nlapiLogExecution('debug','issue splitting memo');
+                    arrParam['custparam_invoice'] = ''
+                }
+
+                //nlapiLogExecution('debug','invoice',arrParam['custparam_invoice'])
+            } else {
+                arrParam['custparam_invoice'] = ''
+            }
+
+            //nlapiLogExecution('debug','arrparam cost',arrParam.length);
+
+            var url = nlapiResolveURL('SUITELET','customscript_mb_suitelet_build_auditline','customdeploy_mb_build_audit_lines','external');
+
+            var response = nlapiRequestURL(url,arrParam);
+
+            var result = response.getBody();
+
+            //nlapiLogExecution('debug','add line result',result);
+
+        } catch(e){
+            var error = errText(e);
+            nlapiLogExecution("error","Error creating Audit Lines",JSON.stringify(error));
+            if (e instanceof nlobjError){
+                if (e.getCode() == 111){
+                    throw usageError;
+                }
+            }
+        }
+    },
+
+    checkLines : function(auditRec,arrComplete,arrIncomplete){
+        // removed/not used
+    }
+}
+// Create Inv Adj for date-1 for same inv quantity
+
+var newInvAdjRec = { // PD object function
+    entityName: "inventoryadjustment",
+    sublist: 'inventory',
+    //recordId : "",
+    // create custom record
+    insertRecord : function(tranId,date,sub,auditRec){
+
+        try{
+            var name = tranId.split('_')[0];
+            var newName = name+'_inv_adj_script';
+
+            var invAdj = nlapiCreateRecord(this.entityName);
+
+            invAdj.setFieldValue('trandate',date); // tran date
+            invAdj.setFieldValue('memo','Script created adjustment to create transfers and PDs for Negative Inventory for: '+date);
+            invAdj.setFieldValue('tranid', newName);
+            invAdj.setFieldValue('subsidiary',sub);
+            invAdj.setFieldValue('account',newInvAdjAcctId);
+            invAdj.setFieldValue('custbody_mb_linked_audit_rec',auditRec);
+
+            //var recordId = nlapiSubmitRecord(invAdj);
+
+        } catch(e){
+            nlapiLogExecution("error", "Insert Inv Adj Record Error", errText(e));
+            if (err instanceof nlobjError){
+                if (err.getCode() == 111){
+                    throw usageError;
+                }
+            }
+        }
+        //	nlapiLogExecution('debug','invadj id',recordId)
+
+        return (invAdj);
+    },
+
+    addInvLines : function(rcd,item,qty,channel,location,cost,bins,reason,invAdjId,memo,packsize,parent,createPDs){
+
+        if (createPDs!='F' && createPDs!=false){
+            try {
+                rcd.selectNewLineItem(this.sublist);
+                rcd.setCurrentLineItemValue(this.sublist,'item',item);
+                rcd.setCurrentLineItemValue(this.sublist,'adjustqtyby',qty);
+                rcd.setCurrentLineItemValue(this.sublist,'class',channel);
+                rcd.setCurrentLineItemValue(this.sublist,'location',location);
+                rcd.setCurrentLineItemValue(this.sublist,'custcol_mb_item_pack_size',packsize);
+                rcd.setCurrentLineItemValue(this.sublist,'custcol_mb_item_parent',parent);
+                rcd.setCurrentLineItemValue(this.sublist,'memo',memo)
+                rcd.setCurrentLineItemValue(this.sublist,'unitcost',roundVal(cost));
+
+                var subrecord = rcd.createCurrentLineItemSubrecord('inventory', 'inventorydetail');
+                var flag = false;
+
+                for (x=0;x<bins.length;x++){
+
+                    subrecord.selectNewLineItem('inventoryassignment');
+                    subrecord.setCurrentLineItemValue('inventoryassignment', 'binnumber', bins[x].bin);
+                    subrecord.setCurrentLineItemValue('inventoryassignment', 'quantity', bins[x].binQty);
+                    subrecord.commitLineItem('inventoryassignment');
+                    var flag = true
+                }
+
+                //rcd.setCurrentLineItemValue(this.sublist,)
+                rcd.setCurrentLineItemValue(this.sublist,'unitcost',roundVal(cost));
+                if (flag==true) subrecord.commit();
+                rcd.commitLineItem(this.sublist)
+            } catch (err){
+                nlapiLogExecution('error','Error in creating new inv adj rec line',errText(err));
+                if (err instanceof nlobjError){
+                    if (err.getCode() == 111){
+                        throw usageError;
+                    }
+                }
+            }
+        }
+    }
+}
+
+function getBins(invAdjRec, line){ // gets bins from a given line;
+    var bins = []
+
+    try {
+        var subrecord = invAdjRec.viewLineItemSubrecord('inventory', 'inventorydetail', line);
+        var binCt = null;
+        if (subrecord){
+            var binCt = subrecord.getLineItemCount('inventoryassignment');
+        }
+
+
+        if (binCt){
+
+            for (z=1;z<=binCt;z++){
+                subrecord.selectLineItem('inventoryassignment',z)
+                var bin = subrecord.getCurrentLineItemValue('inventoryassignment','binnumber');
+
+                var binQty = subrecord.getCurrentLineItemValue('inventoryassignment','quantity');
+
+                bins.push({'bin':bin,'binQty':oppVal(binQty),'name':subrecord.getCurrentLineItemText('inventoryassignment','binnumber')})
+            }
+        }
+    } catch(err){
+        nlapiLogExecution('error','Error in fetching bins',errText(err));
+    }
+
+    return bins;
+};
+
+function getSublistIds(rec,sublist){ // gets sublist ids to get true line if lines were deleted;
+    if (typeof rec == 'object'){
+        var retArr = new Array();
+        retArr.push('0');
+        var ct = rec.getLineItemCount(sublist);
+        for (z=1;z<=ct;z++){
+            var line = rec.getLineItemValue(sublist,'line',z);
+            retArr.push(line);
+        }
+        return retArr;
+    } else {
+        return null;
+    }
+}
+
+function getTrueLine(array,line){ // uses array from the function above to search the array to get the true sublist placement;
+
+    var a = line.toString()
+    var result = array.indexOf(a);
+
+    return result;
+
+}
+
+
+// helper functions
+
+// get saved search results
+function generateSavedSearchResults(savedSearchId , savedSearchName , addFilters , enableAddFilters , addColumns, enableAddColumns,recType) {
+    var generatedResults = new Array();
+    var searchColumns = new Array();
+    if( ((addFilters != '' && addFilters != null) || enableAddFilters != 'T' ) || ((addColumns != '' && addColumns != null) || enableAddColumns != 'T' )){
+        try{
+
+            var remainingUsage = nlapiGetContext().getRemainingUsage()
+            //nlapiLogExecution('audit','remaining usage',remainingUsage)
+            if (remainingUsage<= MINIMUM_USAGE) {
+                nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+                var scriptId = nlapiGetContext().getScriptId();
+                var status = nlapiScheduleScript(scriptId);
+                nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+                throw usageError;
+            }
+
+            //Executing a Saved search with received savedSearchId
+            var recordSearch = nlapiLoadSearch('', savedSearchId);
+
+            if( addFilters != '' && addFilters != null && enableAddFilters == 'T' ){
+                recordSearch.addFilters( addFilters );
+            };
+
+            if (addColumns !='' && addColumns!=null && enableAddColumns =='T'){
+                recordSearch.addColumns(addColumns);
+            };
+
+            var resultSet=recordSearch.runSearch();
+            var resultslice = '';
+            var id=0;
+//			nlapiLogExecution("debug", "sr length", resultSet.length);
+
+            for(var t=0 ; resultslice.length >= 1000 || t ==0 ; t++){
+
+                resultslice = resultSet.getResults(id, id+1000 );
+                if (resultslice != null && resultslice != ''){
+                    generatedResults = generatedResults.concat(resultslice);
+                    id += resultslice.length;
+                }
+//				nlapiLogExecution("debug", "output length", generatedResults.length);
+            }
+            searchColumns = recordSearch.getColumns();
+            return [generatedResults , searchColumns ];
+        }catch(err){
+            nlapiLogExecution('ERROR','Error Occured in Processing SavedSearch('+savedSearchName+':'+savedSearchId+') Results Block ',errText(err));
+            if (err instanceof nlobjError){
+                if (err.getCode() == 111){
+                    throw usageError;
+                }
+            }
+            return [generatedResults , searchColumns ];
+        }
+    }
+    return [generatedResults , searchColumns ];
+}
+
+function sendErrorInfo(fromEmail,toEmail,emailSubject,emailBody) {
+
+    try{
+        if(emailBody && fromEmail && toEmail){
+            nlapiSendEmail(fromEmail, toEmail, emailSubject, emailBody);
+        }
+    }catch(e){
+        nlapiLogExecution('error', 'There was a error while sending a mail', e);
+    }
+}
+
+function parseFloatOrZero(val) {
+    return isNaN(parseFloat(val)) ? 0 : parseFloat(val);
+}
+
+function errText(_e) {
+    _internalId = nlapiGetRecordId();
+    if (!(typeof _internalId === "number" && (_internalId % 1) === 0)) {
+        _internalId = 0;
+    }
+    var txt = "";
+    if (_e instanceof nlobjError) {
+        // this is netsuite specific error
+        txt = "SuiteScript Error: Record ID :: " + _internalId + " :: " + _e.getCode() + " :: " + _e.getDetails() + " :: " + _e.getStackTrace().join(", ");
+    }
+    else {
+        // this is generic javascript error
+        txt = "JavaScript/Other Error: Record ID :: " + _internalId + " :: " + _e.toString() + " : " + _e.stack;
+    }
+    return txt;
+}
+
+function roundVal(val) {
+    var dec = 5;
+    var result = Math.round(val * Math.pow(10, dec)) / Math.pow(10, dec);
+    return result;
+}
+
+function emptyIfNull(val) {
+    return val == null ? "" : val;
+}
+
+function absVal(n){
+    var num = parseFloat(n)
+    if (num < 0) {
+        return (num*-1)
+    } else {
+        return num;
+    }
+}
+
+function oppVal(int){
+    var num = parseFloat(int)
+    return (num*-1)
+}
+
+function getDate(date,addDays){
+    try {
+        if (addDays ==null || addDays == ''){
+            addDays = 0;
+        }
+        var dateToSet = new Date(date);
+
+        var newDate = nlapiAddDays(dateToSet,addDays);
+        var result = nlapiDateToString(newDate,'date')
+
+        return result;
+    } catch(err){
+        nlapiLogExecution('error','Error getting dates',JSON.stringify(err));
+        return '';
+    }
+
+}
+
+function setPreference(date){
+    try{
+        var config = nlapiLoadConfiguration('companypreferences');
+        config.setFieldValue('custscript_mb_first_date',date);
+        config.setFieldValue('custscript_mb_second_date',date);
+        var submit = nlapiSubmitConfiguration(config);
+        return 'Success';
+    } catch(err){
+        return 'Failure';
+        nlapiSendEmail('1423','Lucas@mibar.net','Error setting preferences','Manually restart the 5025 script');
+    }
+
+}
+
+// not used anymore/would need to be altered to be used now.
+function checkPDs(internalId){
+    try {
+        var rec = nlapiLoadRecord('inventoryadjustment',internalId);
+        var lineCt = rec.getLineItemCount('inventory');
+        var date = rec.getFieldValue('trandate');
+        var prefixDate = getDate(date,1);
+        var tranId = rec.getFieldValue('tranid');
+        var recChanged=false;
+        var quantityIssues = '';
+        var body2 ='';
+
+        var j= parseFloat(lineCt)
+
+        for (j;j>0;j--){
+            var totalRecCostChanges = 0;
+            rec.selectLineItem('inventory',j);
+            var memo = rec.getCurrentLineItemValue('inventory','memo');
+            if (memo!=''){
+                if (memo.search('5025 Finish PD creation script')!=-1){
+
+                    var item = rec.getCurrentLineItemText('inventory','item');
+                    var itemId = rec.getCurrentLineItemValue('inventory','item');
+                    var unitCost = rec.getCurrentLineItemValue('inventory','unitcost');
+                    var location = rec.getCurrentLineItemValue('inventory','location');
+                    var locationName = rec.getCurrentLineItemText('inventory','location')
+                    var memo = rec.getCurrentLineItemValue('inventory','memo');
+                    if (memo.search('[SCR_MASK]')!=-1) continue;
+                    var firstDate = '12/31/2017';
+
+                    var totalCost = parseFloat(unitCost)*parseFloat(adjQty);
+
+                    var bin = getBins(rec,j);
+                    var arrBinId = new Array();
+
+                    for (k=0;k<bin.length;k++){
+                        binNum = bin[k].bin;
+                        arrBinId.push(binNum);
+                    }
+
+                    var remainingUsage = nlapiGetContext().getRemainingUsage()
+                    nlapiLogExecution('audit','remaining usage',remainingUsage)
+                    if (remainingUsage<= MINIMUM_USAGE) {
+                        throw usageError;
+                    }
+
+                    var filters2 = new Array();
+                    filters2.push(new nlobjSearchFilter('item',null,'anyof',itemId));
+                    filters2.push(new nlobjSearchFilter('location',null,'anyof',location));
+                    filters2.push(new nlobjSearchFilter('trandate',null,'onorbefore',date));
+                    if (bin!=null && bin!='') filters2.push(new nlobjSearchFilter('internalid','binNumber','anyof',arrBinId));
+                    if (firstDate!='') filters2.push(new nlobjSearchFilter('trandate',null,'onorafter',firstDate));
+
+                    var columns2 = new Array();
+                    columns2.push(new nlobjSearchColumn('lastpurchaseprice','item',null));
+                    columns2.push(new nlobjSearchColumn('cost','item',null));
+
+                    var arrSearch = generateSavedSearchResults('customsearch_mb_inventory_valuation_dt_4','Inventory Valuation Search',filters2,'T',columns2,'T',null)//nlapiSearchRecord('transaction',null,filters2,columns3);
+                    var sumSearch = arrSearch[0];
+                    var columns = arrSearch[1];
+
+                    if (sumSearch.length>0){
+
+                        var sum = sumSearch.reduce(qtyReducer,0);//parseFloat(res.getValue('quantity',null,'SUM')) //- adjQty;
+                        if (sum!=0 && sum!='NaN'){
+
+                            if (sum!=0){
+                                var totalCost = parseFloat(unitCost)*parseFloat(adjQty);
+                                var msg = ' Item: '+item+' adjQty: '+adjQty+' total cost: '+totalCost;
+                                var msg2 = ' Location: '+locationName+'Bin: '+arrBinId+' sum: '+sum+' ; ';
+                            };
+                        };
+                    };
+
+                    if (msg && msg2) var msgs = msg.toString()+msg2.toString();
+                    quantityIssues+=msgs;
+//					}
+
+                } else if (j!=(lineCt-1)){
+                    break;
+                }
+            }
+        }
+        var emailBody = 'Check the lines on this transaction: '+tranId+' '+quantityIssues;
+        nlapiSendEmail('1423','Lucas@mibar.net','Quantity Check for '+tranId,emailBody);
+
+        var remainingUsage = nlapiGetContext().getRemainingUsage()
+        if (remainingUsage<= MINIMUM_USAGE) {
+            //  nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+            //var scriptId = nlapiGetContext().getScriptId();
+            //var status = nlapiScheduleScript(scriptId);
+            //nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+            throw usageError;
+        }
+    } catch(err){
+        nlapiLogExecution('error','Error in Check Finish PDs',JSON.stringify(err));
+        if (err instanceof nlobjError){
+            if (err.getCode() == 111){
+                nlapiSendEmail('1423','Lucas@mibar.net','Hit Usage Error','Check Script Execution and restart if needed');
+                throw usageError;
+            }
+        }
+
+    }
+}
+
+
+function getPrefix(date){
+    try {
+        var arr = date.split('/');
+        var monthNum = arr[0];
+        var dayNum = arr[1].toString();
+        if (dayNum.length==1) dayNum = '0'+dayNum;
+        var monthName = ''
+        switch(monthNum){
+            case '1':
+                monthName = 'Jan';
+                break;
+            case '2':
+                monthName = 'Feb';
+                break;
+            case '3':
+                monthName = 'Mar';
+                break;
+            case '4':
+                monthName = 'Apr';
+                break;
+            case '5':
+                monthName = 'May';
+                break;
+            case '6' :
+                monthName = 'Jun';
+                break;
+            case '7' :
+                monthName = 'Jul';
+                break;
+            case '8':
+                monthName = 'Aug';
+                break;
+            case '9':
+                monthName = 'Sep';
+                break;
+            case '10':
+                monthName = 'Oct';
+                break;
+            case '11':
+                monthName = 'Nov';
+                break;
+            case '12':
+                monthName = 'Dec';
+        }
+        var str = arr[2].toString()+monthName+dayNum.toString();
+        return str;
+    } catch(err){
+        nlapiLogExecution('error','Error getting prefix',JSON.stringify(err));
+        return null;
+    }
+
+}
+
+function setPreference(date){
+    try{
+        var config = nlapiLoadConfiguration('companypreferences');
+        config.setFieldValue('custscript_mb_first_date_fix',date);// CHANGE FIELD
+        config.setFieldValue('custscript_mb_second_date_fix',date); // CHANGE FIELD
+        var submit = nlapiSubmitConfiguration(config);
+        return 'Success';
+    } catch(err){
+        return 'Failure';
+        nlapiSendEmail('1423','Lucas@mibar.net','Error setting preferences','Manually start the 5025 script');
+    }
+
+}
+
+
+function getBinID(bin){
+    var filters = new Array();
+    filters.push(new nlobjSearchFilter('binnumber',null,'is',bin));
+    var columns = new Array();
+    columns.push(new nlobjSearchColumn('internalid'));
+
+    var search = nlapiSearchRecord('bin',null,filters,columns);
+    if (search){
+        return search[0].getValue('internalid');
+    } else {
+        return null;
+    };
+}

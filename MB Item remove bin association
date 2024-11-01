@@ -1,0 +1,111 @@
+/**
+ * Module Description
+ * Version            - 1.0
+ * Script Type        - ScheduleScript
+ * Description        - Remove bin association from item
+ * Author             - Mibar
+ */
+
+
+var MINIMUM_USAGE = 1000;
+var binNumber = '';
+var binSubList = "binnumber";
+function recordsToremove(type) {
+    var context = nlapiGetContext();
+    var searchResults = new Array();
+    var entityName = 'inventoryitem';
+    var searchObj = nlapiLoadSearch(entityName, 'customsearch_mb_bin_in_txn_but_notin_itm');
+
+    var resultset = searchObj.runSearch();
+
+    if (resultset != null) {
+        var searchid = 0;
+        do {
+            try {
+                var resultslice = resultset.getResults(searchid, searchid + 1000);
+                if (resultslice != null && resultslice != '') {
+                    for (var rs in resultslice) {
+                        searchResults.push(resultslice[rs]);
+                        searchid++;
+                    }
+                }
+            }
+            catch (e) {
+                nlapiLogExecution('debug', 'Error has occured', e);
+            }
+        }
+        while (resultslice.length >= 1000);
+    }
+
+    for (var i = 0; i < searchResults.length; i++) {
+        if (nlapiGetContext().getRemainingUsage() <= MINIMUM_USAGE) {
+            nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left('
+					+ nlapiGetContext().getRemainingUsage()
+					+ ') . Exiting and rescheduling script.');
+            setRecoveryPoint();
+            checkGovernance();
+        }
+        try {
+
+            //
+            var columns = searchResults[i].getAllColumns();
+            var item = searchResults[i].getValue(columns[0]); //("ITEMINTERNAL");
+            var binID = searchResults[i].getValue(columns[1]); //("BININTERNAL");
+            var binInternalID = searchResults[i].getText(columns[1]); //("BININTERNAL");
+
+            var qoh = searchResults[i].getValue(columns[2]);  //("BINQOH");
+            nlapiLogExecution("debug", "ITEMINTERNAL ", item + '--' + binInternalID + '--' + binID + '--' + qoh);
+            //binnumber  : nlapiGetLineItemValue(binSubList, "binnumber", i),
+
+            var rcdItem = nlapiLoadRecord("inventoryitem", item);
+
+            if (rcdItem != null) {
+                rcdItem.selectNewLineItem(binSubList);
+                rcdItem.setCurrentLineItemValue(binSubList, 'preferredbin', 'F');
+                rcdItem.setCurrentLineItemValue(binSubList, 'binnumber', binID);
+                rcdItem.commitLineItem(binSubList);
+                nlapiSubmitRecord(rcdItem, false);
+            }
+
+            //
+
+            //nlapiDeleteRecord(searchResults[i].getRecordType(), searchResults[i].getId());
+            //nlapiLogExecution('debug', 'searchResults ', searchResults[i].getRecordType() + '--'+ searchResults[i].getId() );
+
+        }
+        catch (e) {
+            nlapiLogExecution('debug', 'Error has occured', e);
+        }
+        break;
+        //nlapiLogExecution('debug', searchResults[i].getRecordType(), searchResults[i].getId());
+    }
+}
+
+
+function setRecoveryPoint() {
+    var state = nlapiSetRecoveryPoint();
+    if (state.status == 'SUCCESS')
+        return;
+
+    if (state.status == 'RESUME') {
+        nlapiLogExecution("ERROR", "Resuming script because of " + state.reason
+				+ ".  Size = " + state.size);
+        return;
+    } else if (state.status == 'FAILURE') {
+        nlapiLogExecution("ERROR", "Failed to create recovery point. Reason = "
+				+ state.reason + " / Size = " + state.size);
+    }
+}
+
+function checkGovernance() {
+    var context = nlapiGetContext();
+    if (context.getRemainingUsage() < MINIMUM_USAGE) {
+        var state = nlapiYieldScript();
+        if (state.status == 'FAILURE') {
+            nlapiLogExecution("ERROR",
+					"Failed to yield script, exiting: Reason = " + state.reason
+					+ " / Size = " + state.size);
+            throw "Failed to yield script";
+                     }
+    }
+}

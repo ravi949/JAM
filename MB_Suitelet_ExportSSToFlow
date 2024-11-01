@@ -1,0 +1,254 @@
+/**
+ * Module Description
+ *
+ * Version    Date            Author           Remarks
+ * 1.00       14 Dec 2018     lucas			   
+ *
+ *
+ */ 
+
+var MINIMUM_USAGE = 200;
+var searchIds = [/*'customsearch_mb_target_inventory'*/ '863'];//,'customsearch_mb_target_inventory_3','customsearch_mb_target_inventory_2'];
+var searchNames = ['Target Inventory CODE LINKED'];//,'WB Mason Inventory CODE LINKED','Office Depot Inventory CODE LINKED']
+var restUrl= 'https://prod-36.westus.logic.azure.com:443/workflows/4dc38d80634d478887a9d9a39baf0809/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=NbSOVCNFnm-zg2GD3264UYhl16wJZDo3vkt3RUtagk0'
+// TEST URL var restUrl = 'https://prod-46.westus.logic.azure.com:443/workflows/3faba7065237451c880689127edb23f9/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=XZ_hx3t88BjyZRtq7kCTUlC-O2e3rk-hXmds0SDUJ-M'
+
+
+function scheduled(){
+	var postData = getRecord();
+	nlapiLogExecution('debug','sample data',postData);
+	var headers = {'Content-Type':'application/JSON'}
+
+	var post = nlapiRequestURL(restUrl, postData, headers, null, "POST");
+	//nlapiLogExecution('debug','post response',JSON.stringify(post));
+};
+
+function getRecord(datain){
+	var data = new Array();
+	
+	for (var len = 0;len<searchIds.length;len++) {
+		
+		var searchId = searchIds[len];
+		var searchName = searchNames[len];
+		var curData = getCSVData(searchId,searchName);
+		
+		data.push(curData);
+	}
+	
+	var csvData = JSON.stringify(data);
+	//return JSON.stringify(soArray);
+	//nlapiLogExecution('debug','so array',soArray)
+	return csvData;
+}
+
+function getCSVData(searchId,searchName){
+	try {
+//		var txtBody = '';
+		var filters = new Array();
+		var columns = new Array();
+		var arrColObj = new Array();
+		var arrFilterObj = new Array();
+		var rows = new Array();
+		var rows2 = '';
+	
+		var fileName = searchName.toLowerCase().split('inventory')[0].trim().replace(' ','_').toUpperCase();
+		fileName+='.txt';
+	
+		nlapiLogExecution('debug','filename', fileName);
+		
+		var search = generateSavedSearchResults(searchId,searchName,null,null,null,null,null);
+		
+		if (search){
+//			nlapiLogExecution('debug','search length',search.length);
+			var columns = search[1];
+			var filters = search[2];
+			
+			for (var l = 0;l<filters.length;l++){
+
+				var filter = filters[l];
+				
+				var formula = filter.getFormula();
+				var name = filter.getName();
+				var join = filter.getJoin();
+//				var sort = filter.getSort();
+//				var sum = filter.getSummary();
+				var operator = filter.getOperator();
+				
+				var filterObject = {
+						'name':name,
+						'formula':formula,
+						'join':join,
+//						'sort':sort,
+//						'sum' : sum,
+						'operator':operator
+				};
+				
+				arrFilterObj.push(filterObject);
+				
+			};
+			
+			for (var i=0;i<columns.length;i++){
+				
+				var col = columns[i];
+				
+				var label = col.getLabel();
+				var formula = col.getFormula();
+				var name = col.getName();
+				var join = col.getJoin();
+				var sort = col.getSort();
+				var sum = col.getSummary();
+				
+				var colObject = {
+						'name':name,
+						'label':label,
+						'formula':formula,
+						'join':join,
+						'sort':sort,
+						'sum' : sum
+				};
+				
+				arrColObj.push(colObject);
+				
+			};
+			var sColumns = new Array();
+			var columnNames = '';
+			var sFilters = filters;
+			//new Array();
+			
+//			nlapiLogExecution('debug','filters',JSON.stringify(filters));
+			
+			for (var z=0;z<arrColObj.length;z++){
+				var obj = arrColObj[z];
+//				nlapiLogExecution('debug','obj',JSON.stringify(obj));
+				sColumns.push(new nlobjSearchColumn(obj.name,obj.join,obj.sum).setFormula(obj.formula).setSort(obj.sort).setLabel(obj.label));
+				columnNames+=obj.label
+				columnNames+=','
+			};
+			
+			columnNames+='\r\n';
+			rows2+=columnNames;
+//			for (var x=0;x<arrColObj.length;x++){
+//				var obj = arrFilterObj[x];
+////				nlapiLogExecution('debug','obj',JSON.stringify(obj));
+//				sFilters.push(new nlobjSearchFilter(obj.name,obj.join,obj.sum).setFormula(obj.formula).setSort(obj.sort).setLabel(obj.label));
+//			};
+			
+			
+//			var resSearch = nlapiSearchRecord('item',null,sFilters,sColumns);
+			
+			var recordSearch = nlapiCreateSearch('item',sFilters,sColumns);
+			var resultSet = recordSearch.runSearch();
+			var resSearch = new Array();
+			var resultslice = '';
+			var id=0;
+			nlapiLogExecution("debug", "sr length", resultSet.length);
+			
+			for(var t=0 ; resultslice.length >= 1000 || t ==0 ; t++){
+
+				resultslice = resultSet.getResults(id, id+1000 );
+				if (resultslice != null && resultslice != ''){
+					resSearch = resSearch.concat(resultslice);
+					id += resSearch.length;
+				}
+				
+				nlapiLogExecution("debug", "output length", resSearch.length);
+			}
+			
+			if (resSearch){
+				
+				for (var k=0;k<resSearch.length;k++){
+					var objToPush = new Object();
+					var string = '';
+					
+					var res = resSearch[k];
+				
+					for (var j=0;j<sColumns.length;j++){
+						
+						var colObj = arrColObj[j];
+						var colName = colObj.label;
+						
+						var val = res.getValue(sColumns[j]);
+						
+						objToPush[colName] = val;
+						
+						if (k==(resSearch.length-1) && j==(sColumns.length-1)){
+							string+=val;
+						} else {
+							string+=val+',';
+						};
+					};
+					
+					rows.push(objToPush);
+					string+='\r\n';
+					rows2+=string;
+					continue;
+				}
+			}
+		};
+		
+		if (rows && fileName){
+			return {
+				'filename':fileName,
+				'rows':rows,
+				'rows2':rows2
+			};			
+		} 
+	} catch(e){
+		nlapiLogExecution('error','Error Creating Txt File',JSON.stringify(e));
+		return "Didnt work"
+	}
+}
+
+function generateSavedSearchResults(savedSearchId , savedSearchName , addFilters , enableAddFilters , addColumns, enableAddColumns,recType) {
+	var generatedResults = new Array();
+	var searchColumns    = new Array();
+	if( ((addFilters != '' && addFilters != null) || enableAddFilters != 'T' ) || (addColumns != '' && addColumns != null) || enableAddColumns != 'T' ){
+		try{
+			
+			var remainingUsage = nlapiGetContext().getRemainingUsage()
+			//nlapiLogExecution('audit','remaining usage',remainingUsage)
+			if (remainingUsage<= MINIMUM_USAGE) {
+			    nlapiLogExecution('AUDIT', 'Scheduled Script', 'Not enough usage left(' + nlapiGetContext().getRemainingUsage() + ') . Exiting and rescheduling script.');
+				var scriptId = nlapiGetContext().getScriptId();
+				var status = nlapiScheduleScript(scriptId);
+				nlapiLogExecution('AUDIT', 'Scheduled Script schedule status', status);
+				return null;
+			}
+			nlapiLogExecution('debug','id',savedSearchId);
+			//Executing a Saved search with received savedSearchId
+			var recordSearch = nlapiLoadSearch('', savedSearchId);
+			if( addFilters != '' && addFilters != null && enableAddFilters == 'T' ){
+				recordSearch.addFilters( addFilters );
+			};
+			
+			if (addColumns !='' && addColumns!=null && enableAddColumns =='T'){
+				recordSearch.addColumns(addColumns);
+			};
+
+//			var resultSet=recordSearch.runSearch();
+//			var resultslice = '';
+//			var id=0;
+//			nlapiLogExecution("debug", "sr length", resultSet.length);
+//			
+//			for(var t=0 ; resultslice.length >= 1000 || t ==0 ; t++){
+//
+//				resultslice = resultSet.getResults(id, id+1000 );
+//				if (resultslice != null && resultslice != ''){
+//					generatedResults = generatedResults.concat(resultslice);
+//					id += resultslice.length;
+//					nlapiLogExecution('debug','id',id);
+//				}
+//				nlapiLogExecution("debug", "output length", generatedResults.length);
+//			}
+			
+			searchColumns = recordSearch.getColumns();
+			searchFilters = recordSearch.getFilters();
+//			nlapiLogExecution('debug','search filters',searchFilters);
+			return [null , searchColumns,searchFilters ];
+		}catch(ERR_SavedSearch){
+			nlapiLogExecution('ERROR','Error Occured in Processing SavedSearch('+savedSearchName+':'+savedSearchId+') Results Block ',ERR_SavedSearch);
+			return [generatedResults , searchColumns, searchFilters ];
+		}
+	}
+	return [generatedResults , searchColumns,searchFilters ];
+}
